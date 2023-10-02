@@ -55,9 +55,9 @@ def validate(test_dataloader, model):
 
 if __name__ == '__main__':
     ########## Change it with your data ##############
-    data_file = "./data/Xiaohan/sample/cropped2-2.tif"
-    model_file = "./src/GUI/trained_models/bs1.pth" # "./results/saved_models/mytest/model_0.pth"
-    output_file = "./results/xiaohan_denoised_0.tif"
+    data_file = "./data/line3_100frames_100Hz_200ms_3.56Hz_005MPA_50DC-292.tif"
+    model_file = "./results/saved_models/ustest/model_5.pth" # "./results/saved_models/mytest/model_0.pth"
+    output_file = "./data/line3_100frames_100Hz_200ms_3.56Hz_005MPA_50DC-292_denoised.tif"
     patch_size = [61, 64, 64]
     patch_interval = [1, 32, 32]
     batch_size = 16    # lower it if memory exceeds.
