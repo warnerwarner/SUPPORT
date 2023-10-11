@@ -1,0 +1,21 @@
+Training files:
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_60DC-293.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_20DC-282.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_00MPA_50DC-286.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_01MPA_50DC-291.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_10DC-283.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_50DC-277.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_70DC-294.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_02MPA_50DC-290.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_04MPA_50DC-288.tif
+
+
+Validating files:
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_40DC-280.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_80DC-295.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_05DC-284.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_01DC-285.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_06MPA_50DC-287.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_005MPA_50DC-292.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_50DC-296.tif
+/gpfs/home/warnet02/shohamlab/shared_data/usnm/line3/20190704_mouse2_region1/line3_100frames_100Hz_200ms_3.56Hz_08MPA_30DC-281.tif
