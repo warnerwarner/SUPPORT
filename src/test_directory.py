@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 import skimage.io as skio
+import os
+import os.path
 
 from tqdm import tqdm
 from src.utils.dataset import DatasetSUPPORT_test_stitch
@@ -55,28 +57,59 @@ def validate(test_dataloader, model):
 
 if __name__ == '__main__':
     ########## Change it with your data ##############
-    data_file = "./data/line3_100frames_100Hz_200ms_3.56Hz_005MPA_50DC-292.tif"
-    model_file = "./results/saved_models/ustest/model_5.pth" # "./results/saved_models/mytest/model_0.pth"
-    output_file = "./data/line3_100frames_100Hz_200ms_3.56Hz_005MPA_50DC-292_denoised.tif"
+    
+    model_file = "./src/GUI/trained_models/bs3.pth"
+    foldername = "./data/directory_test"
+    saveheader = "./results/directory_test_repeat"
+
+    if not os.path.exists(saveheader):
+        print('save directory created.')
+        os.makedirs(saveheader, exist_ok=True)
+
+    data_files = []
+    output_files = []
+    for dirpath, dirnames, filenames in os.walk(foldername):
+        for filename in [f for f in filenames if f.endswith(".tif")]:
+            print('data name : ', filename)
+            data_files.append(os.path.join(dirpath, filename))
+            output_files.append(f"{saveheader}/denoised_{filename}")
+    
     patch_size = [61, 64, 64]
     patch_interval = [1, 32, 32]
     batch_size = 16    # lower it if memory exceeds.
     bs_size = 3    # modify if you changed bs_size when training.
-    bp_mode = False
+    include_first_and_last = None # "repeat" # None, "repeat", "mirror"
     ##################################################
 
-    model = SUPPORT(in_channels=61, mid_channels=[16, 32, 64, 128, 256], depth=5,\
-            blind_conv_channels=64, one_by_one_channels=[32, 16], last_layer_channels=[64, 32, 16], bs_size=bs_size, bp=bp_mode).cuda()
+    model = SUPPORT(in_channels=patch_size[0], mid_channels=[16, 32, 64, 128, 256], depth=5,\
+            blind_conv_channels=64, one_by_one_channels=[32, 16], last_layer_channels=[64, 32, 16], bs_size=bs_size).cuda()
 
     model.load_state_dict(torch.load(model_file))
 
-    demo_tif = torch.from_numpy(skio.imread(data_file).astype(np.float32)).type(torch.FloatTensor)
-    demo_tif = demo_tif[:, :, :]
+    for i, (data_file, output_file) in enumerate(zip(data_files, output_files)):
+        demo_tif = torch.from_numpy(skio.imread(data_file).astype(np.float32)).type(torch.FloatTensor)
+        if include_first_and_last == "repeat":
+            print(f"Warning. First and Last frame will be \"processed\", this is just workaround, not the ideal solution.")
+            demo_tif = torch.cat([
+                    demo_tif[0, :, :].unsqueeze(0).repeat((patch_size[0] // 2, 1, 1)),
+                    demo_tif,
+                    demo_tif[-1, :, :].unsqueeze(0).repeat((patch_size[0] // 2, 1, 1)),
+                ])
+        elif include_first_and_last == "mirror":
+            print(f"Warning. First and Last frame will be \"processed\", this is just workaround, not the ideal solution.")
+            demo_tif = torch.cat([
+                    demo_tif[1:(patch_size[0] // 2)+1, :, :].flip(0),
+                    demo_tif,
+                    demo_tif[-1 * (patch_size[0] // 2)-1:-1, :, :].flip(0),
+                ])
 
-    testset = DatasetSUPPORT_test_stitch(demo_tif, patch_size=patch_size,\
-        patch_interval=patch_interval)
-    testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size)
-    denoised_stack = validate(testloader, model)
+        testset = DatasetSUPPORT_test_stitch(demo_tif, patch_size=patch_size,\
+            patch_interval=patch_interval)
+        testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size)
+        denoised_stack = validate(testloader, model)
 
-    print(denoised_stack.shape)
-    skio.imsave(output_file, denoised_stack[(model.in_channels-1)//2:-(model.in_channels-1)//2, : , :], metadata={'axes': 'TYX'})
+        if include_first_and_last in ["repeat", "mirror"]:
+            denoised_stack = denoised_stack[patch_size[0] // 2:-1 * (patch_size[0] // 2)]
+
+        print('Output: ', output_file, ' shape: ', denoised_stack.shape)
+        skio.imsave(output_file, denoised_stack[:, : , :], metadata={'axes': 'TYX'})

@@ -1,6 +1,10 @@
+<h2><a href="https://github.com/NICALab/SUPPORT/blob/main/Beginner_guide.md"> 𝐅𝐨𝐫 𝐭𝐡𝐨𝐬𝐞 𝐰𝐡𝐨 𝐚𝐫𝐞 𝐧𝐞𝐰 𝐭𝐨 𝐏𝐲𝐭𝐡𝐨𝐧, 𝐩𝐥𝐞𝐚𝐬𝐞 𝐜𝐡𝐞𝐜𝐤 𝐭𝐡𝐞 𝐬𝐭𝐞𝐩-𝐛𝐲-𝐬𝐭𝐞𝐩 𝐢𝐧𝐬𝐭𝐫𝐮𝐜𝐭𝐢𝐨𝐧𝐬. 𝐂𝐥𝐢𝐜𝐤 𝐡𝐞𝐫𝐞.</a></h2>
+
 #### We welcome discussions and collaborations! Try SUPPORT on your data, or contact us if you encounter any problems!
 #### Not just voltage imaging data, SUPPORT can be used in any functional, volumetric, and timelapse data!
 #### No additional data required, only noisy data itself is just used!
+
+---
 
 <p align="center">
 <img src="https://github.com/NICALab/SUPPORT/blob/main/logo-1.png" width="120" alt="SUPPORT Logo">
@@ -11,13 +15,11 @@
 <p align="center">
 <img alt="GitHub" src="https://img.shields.io/github/license/NICALab/SUPPORT">
 <img alt="GitHub repo size" src="https://img.shields.io/github/repo-size/NICALab/SUPPORT">
-<a href="https://gitter.im/SUPPORT_/community" target="_blank"> <img alt="gitter" src="https://badges.gitter.im/SUPPORT_/community.svg"> </a>
 <img alt="GitHub issues" src="https://img.shields.io/github/issues/NICALab/SUPPORT">
 <img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/NICALab/SUPPORT?style=social">
 </p>
 
 <p align="center">
-<a href="https://nicalab.github.io/SUPPORT/" target="_blank"><b>Project page</b></a> | 
 <a href="https://www.nature.com/articles/s41592-023-02005-8" target="_blank"><b>Paper</b></a> | 
 <a href="https://doi.org/10.5281/zenodo.8176722" target="_blank"><b>Data</b></a>
 </p>
@@ -28,6 +30,7 @@
 </p>
 
 ## News
+- [11/16/2023] Presented **SUPPORT** at **_SfN Neuroscience 2023_**. Thanks for your intersest, and glad to hear that you are using SUPPORT well!
 - [09/18/2023] Now **SUPPORT** has been published in **_Nature Methods_**! :smile:
 
 
@@ -54,7 +57,7 @@ However, starting with the (Code) or running `train_GUI` requires a GPU with suf
 
 ### Software Requirements
 
-We tested on the following systems:
+This is not requirements, but details of where we have tested on:
 
 - Ubuntu 18.04
 - Python 3.9
@@ -170,6 +173,12 @@ Eom, M. et al. [Statistically unbiased prediction enables accurate denoising of 
 ```
 
 ## FAQ
+**- General**
+
+**Q:** Which format your program/code accept?
+
+**A:** Currently we accept tiff formats.
+
 **- Running with code**
 
 **Q:** Do I need to normalize the data for training and/or testing?
@@ -180,8 +189,36 @@ Eom, M. et al. [Statistically unbiased prediction enables accurate denoising of 
 
 **A:** You don't have to. The output will have the same dimension as the input data in x and y dimensions. However, as we are using past and future *N* frames to obtain the denoised current frame, the first and final *N* frames of the final output are not obtained and discarded.
 
+**Q:** Is it okay to train one model for several tiff stacks, and how can I do it?
+
+**A:** Rather than training different models for "similar" recordings, we may train one SUPPORT model to process them once. There is a `is_folder` option to read all tiff stacks in the directory. For example, you may change like this. 
+```
+python -m src.train --exp_name mytest --noisy_data ./data/sample_data.tif
+--> python -m src.train --exp_name mytest --noisy_data ./data/sample_dataset --is_folder
+```
+
+**Q:** SUPPORT does not denoise my data effectively. Could you offer any suggestions or help?
+
+**A:** To provide you with the best suggestions tailored to your data, we would appreciate it if you coud provide the following information in your email (It will make us faster to understand the situation and think solutions).
+
+```
+Imaging modality
+Name of (calcium/voltage) indicator
+Frame rate
+GPU&Training time (if you already trained on your own.)
+
+Demo data so that we can take a look (if Possible)
+```
+
 **- About GUI**
 
 **Q:** I have a suggestion of UI/function/etc. for train/test GUI. or I found bugs/exceptions/errors. What should I do?
 
 **A:** Make an issue so that we can handle it. If you are familiar with Pytorch and PyQt, a pull request would be fine!
+
+## Star History
+
+If you find our method useful or interesting, please give us star! 🌟
+
+[![Star History Chart](https://api.star-history.com/svg?repos=NICALab/SUPPORT&type=Date)](https://star-history.com/#NICALab/SUPPORT&Date)
+
