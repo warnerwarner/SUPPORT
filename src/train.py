@@ -126,8 +126,11 @@ if __name__=="__main__":
     #-----------
     # Dataset
     # ----------
+    data_dir = "/gpfs/home/warnet02/data/stephen/run012"
+    noisy_data = [os.path.join(data_dir, i) for i in os.listdir(data_dir)]
+    opt.noisy_data = noisy_data
     dataloader_train = gen_train_dataloader(opt.patch_size, opt.patch_interval, opt.batch_size, \
-        opt.noisy_data, opt, is_zarr=opt.is_zarr)
+        noisy_data, opt, is_zarr=opt.is_zarr)
 
     # ----------
     # Model, Optimizers, and Loss

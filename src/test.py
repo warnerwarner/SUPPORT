@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 import skimage.io as skio
+import os
+import re
 
 from tqdm import tqdm
 from src.utils.dataset import DatasetSUPPORT_test_stitch
@@ -53,22 +55,40 @@ def validate(test_dataloader, model):
         return denoised_stack
 
 
+def getHighestModelFile(model_path):
+    pattern = r"model_(\d+)\.pth"
+    numbers = []
+    for f in os.listdir(model_path):
+        match = re.match(pattern, f)
+        if match:
+            numbers.append(int(match.group(1)))
+
+    max_num = max(numbers)
+    model_file = f"{model_path}/model_{max_num}.pth"
+    return model_file
+
 if __name__ == '__main__':
     ########## Change it with your data ##############
-    data_file = "./data/line3_100frames_100Hz_200ms_3.56Hz_005MPA_50DC-292.tif"
-    model_file = "./results/saved_models/ustest/model_5.pth" # "./results/saved_models/mytest/model_0.pth"
-    output_file = "./data/line3_100frames_100Hz_200ms_3.56Hz_005MPA_50DC-292_denoised.tif"
+    data_file = "/gpfs/data/shohamlab/tom/stephen/FOV10_440hz_force1s_9X_1p4x1SAM_0p59t-0p8s-FF_0p25ms-fb_bin1_EOD-on_00001_reconstructed_filtered.tif"
+    model_file = getHighestModelFile("./results/saved_models/stephenVoltage_bs10")
+    #model_file = "./results/saved_models/stephenVoltage/model_90.pth" # "./results/saved_models/mytest/model_0.pth"
+    output_file = "./data/FOV10_440hz_force1s_9X_1p4x1SAM_0p59t-0p8s-FF_0p25ms-fb_bin1_EOD-on_00001_reconstructed_filtered_denoised_bs10.tif"
     patch_size = [61, 64, 64]
     patch_interval = [1, 32, 32]
     batch_size = 16    # lower it if memory exceeds.
-    bs_size = 3    # modify if you changed bs_size when training.
+    bs_size = 10    # modify if you changed bs_size when training.
     bp_mode = False
     ##################################################
 
-    model = SUPPORT(in_channels=61, mid_channels=[16, 32, 64, 128, 256], depth=5,\
-            blind_conv_channels=64, one_by_one_channels=[32, 16], last_layer_channels=[64, 32, 16], bs_size=bs_size, bp=bp_mode).cuda()
+    mod_out = SUPPORT(in_channels=61, mid_channels=[64, 128, 256, 512, 1024], one_by_one_channels=[32, 16], blind_conv_channels=64, last_layer_channels=[64, 32, 16], bs_size=bs_size).cuda()
+    mod_out.out_convs[0] = torch.nn.Conv2d(in_channels=128, out_channels=32, kernel_size=1).cuda()
+    #model = SUPPORT(in_channels=61, mid_channels=[16, 32, 64, 128, 256], depth=5,\
+            #blind_conv_channels=64, one_by_one_channels=[32, 16], last_layer_channels=[64, 32, 16], bs_size=bs_size, bp=bp_mode).cuda()
 
-    model.load_state_dict(torch.load(model_file))
+    #model.load_state_dict(torch.load(model_file))
+    print(model_file)
+    mod_out.load_state_dict(torch.load(model_file))
+    model = mod_out
 
     demo_tif = torch.from_numpy(skio.imread(data_file).astype(np.float32)).type(torch.FloatTensor)
     demo_tif = demo_tif[:, :, :]
