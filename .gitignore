@@ -1,6 +1,3 @@
-# cache files
-*.pyc
-*.pyo
-.vscode
-*.tmp
-
+# pixi environments
+.pixi/*
+!.pixi/config.toml

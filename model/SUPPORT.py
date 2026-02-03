@@ -13,7 +13,7 @@ class SUPPORT(nn.Module):
     """
     def __init__(self, in_channels, mid_channels=[16, 32, 64, 128, 256], depth=5,\
          blind_conv_channels=64, one_by_one_channels=[32, 16],\
-            last_layer_channels=[64, 32, 16], bs_size=1, bp=False):
+            last_layer_channels=[64, 32, 16], bs_size=1, bp=False, is_raw=False):
         super(SUPPORT, self).__init__()
 
         # check arguments
@@ -43,6 +43,7 @@ class SUPPORT(nn.Module):
         self.bs_size = bs_size
 
         self.bp = bp
+        self.is_raw = is_raw
         if in_channels == 1:
             self.twod = True
         else:
@@ -152,23 +153,26 @@ class SUPPORT(nn.Module):
         blind_conv3x3_layers = []
         for d in range(self.depth3x3):
             c_in = 1 if d == 0 else self.blind_conv_channels
-            # """
+            
+            # NOTE: Always use isotropic dilations regardless of is_raw flag
+            # The is_raw flag is used for data loading/alignment only
+            # Anisotropic dilations were attempted but caused blind spot failure
+            # Gold standard training used isotropic dilations even with is_raw=True
             pd = [pow(2, d), pow(2, d)]
             if d == self.depth3x3 - 1:
                 pd[0] = pd[0] + self.bs_size[0] // 2
                 pd[1] = pd[1] + self.bs_size[1] // 2
-            # """
-            # pd = pow(2, d)*(self.bs_size//2+1)
+            
             blind_conv3x3_layers.append(
                 ConvHole2D(
                     c_in,
                     self.blind_conv_channels,
                     kernel_size=3,
                     stride=1,
-                    padding=pd, # pow(2, d)*(self.bs_size//2+1),
+                    padding=pd,
                     bias=True,
                     padding_mode="zeros",
-                    dilation=pd, # pow(2, d)*(self.bs_size//2+1),
+                    dilation=pd,
                 )
             )
             blind_conv3x3_layers.append(self.relu)
@@ -177,23 +181,24 @@ class SUPPORT(nn.Module):
         blind_conv5x5_layers = []
         for d in range(self.depth5x5):
             c_in = 1 if d == 0 else self.blind_conv_channels
-            # """
+            
+            # NOTE: Always use isotropic dilations regardless of is_raw flag
+            # The is_raw flag is used for data loading/alignment only
             pd = [pow(3, d), pow(3, d)]
-            if d == self.depth5x5 - 1: # assume we will use only last layer if the bs_size is larger than 1
+            if d == self.depth5x5 - 1:
                 pd[0] = pd[0] + self.bs_size[0] // 2
                 pd[1] = pd[1] + self.bs_size[1] // 2
-            # """
-            # pd = (pow(3, d)*(self.bs_size//2+1))
+            
             blind_conv5x5_layers.append(
                 ConvHole2D(
                     c_in,
                     self.blind_conv_channels,
                     kernel_size=5,
                     stride=1,
-                    padding=[pd[0] * 2, pd[1] * 2], # pd * 2, # (pow(3, d)*(self.bs_size//2+1)) * 2,
+                    padding=[pd[0] * 2, pd[1] * 2],
                     bias=True,
                     padding_mode="zeros",
-                    dilation=pd, # *(self.bs_size//2+1),
+                    dilation=pd,
                 )
             )
             blind_conv5x5_layers.append(self.relu)

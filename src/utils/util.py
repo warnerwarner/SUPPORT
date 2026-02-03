@@ -22,6 +22,7 @@ def parse_arguments(empty=False):
     parser.add_argument("--patch_size", type=int, default=[61, 128, 128], nargs="+", help="size of the patches")
     parser.add_argument("--patch_interval", type=int, default=[1, 64, 64], nargs="+", help="size of the patch interval")
     parser.add_argument("--batch_size", type=int, default=16, help="size of the batches")
+    parser.add_argument("--training_size", type=int, default=None, help="number of .tif files to randomly select for training (default: use all)")
 
     # model
     parser.add_argument("--depth", type=int, default=5, help="the number of blind spot convolutions, must be an odd number")
@@ -30,6 +31,10 @@ def parse_arguments(empty=False):
     parser.add_argument("--last_layer_channels", type=int, default=[64, 32, 16], nargs="+", help="the number of channels of 1x1 convs after UNet")
     parser.add_argument("--bs_size", type=int, default=[3, 3], nargs="+", help="the size of the blind spot")
     parser.add_argument("--bp", action="store_true", help="blind plane")
+    parser.add_argument("--is_raw", action="store_true", default=False, help="use anisotropic dilations for raw voltage imaging data (Y minimal, X exponential). Default: False (uses processed/reconstructed data)")
+    parser.add_argument("--align_data", action="store_true", default=False, help="whether to align raw voltage imaging data (only used with --is_raw)")
+    parser.add_argument("--alignment_method", type=str, default="peaks", help="alignment method: 'peaks' or other methods")
+    parser.add_argument("--alignment_kwargs", type=dict, default={}, help="additional kwargs for alignment method")
     parser.add_argument("--unet_channels", type=int, default=[64, 128, 256, 512, 1024], nargs="+", help="the number of channels of UNet")
 
     # training
@@ -61,11 +66,33 @@ def parse_arguments(empty=False):
 
     if not opt.is_zarr:
         if opt.is_folder:
+            import random
             all_files = []
 
             for i in opt.noisy_data:
-                all_files += sorted([str(p) for p in Path(i).rglob('*') if p.is_file()])
-
+                # Recursively find all .tif files
+                tif_files = sorted([str(p) for p in Path(i).rglob('*.tif') if p.is_file()])
+                
+                # Filter based on is_raw flag
+                if opt.is_raw:
+                    # For raw data: exclude files with 'reconstructed' in name
+                    tif_files = [f for f in tif_files if 'reconstructed' not in Path(f).name]
+                else:
+                    # For processed data: only include files with 'reconstructed' in name
+                    tif_files = [f for f in tif_files if 'reconstructed' in Path(f).name]
+                
+                all_files += tif_files
+            
+            # Randomly select subset if training_size is specified
+            if opt.training_size is not None:
+                if opt.training_size < len(all_files):
+                    random.seed(opt.random_seed)  # Use random seed for reproducibility
+                    all_files = random.sample(all_files, opt.training_size)
+                    all_files = sorted(all_files)  # Re-sort for consistency
+                else:
+                    # User requested more files than available
+                    print(f"WARNING: Requested {opt.training_size} files, but only {len(all_files)} available. Using all {len(all_files)} files.")
+            
             opt.noisy_data = all_files
     else:
         if opt.is_folder:
@@ -77,6 +104,18 @@ def parse_arguments(empty=False):
                             all_dirs.append(os.path.join(root, d))
                     dirs[:] = [d for d in dirs if not d.endswith(".zarr")]
             opt.noisy_data = sorted(all_dirs)
+
+    # Print file selection summary
+    print("=" * 70)
+    print("FILE SELECTION SUMMARY")
+    print("=" * 70)
+    filter_type = "raw (excluding 'reconstructed')" if opt.is_raw else "processed (only 'reconstructed')"
+    print(f"Filter mode: {filter_type}")
+    if opt.training_size is not None:
+        print(f"Requested training size: {opt.training_size} files")
+    print(f"Total files selected: {len(opt.noisy_data)}")
+    print("=" * 70)
+    print()
 
     # print the noisy files
     print("Noisy files:")
@@ -104,6 +143,7 @@ def get_opts():
     parser.add_argument("--patch_size", type=int, default=[61, 128, 128], nargs="+", help="size of the patches")
     parser.add_argument("--patch_interval", type=int, default=[1, 64, 64], nargs="+", help="size of the patch interval")
     parser.add_argument("--batch_size", type=int, default=16, help="size of the batches")
+    parser.add_argument("--training_size", type=int, default=None, help="number of .tif files to randomly select for training (default: use all)")
 
     # model
     parser.add_argument("--depth", type=int, default=5, help="the number of blind spot convolutions, must be an odd number")
@@ -112,6 +152,10 @@ def get_opts():
     parser.add_argument("--last_layer_channels", type=int, default=[64, 32, 16], nargs="+", help="the number of channels of 1x1 convs after UNet")
     parser.add_argument("--bs_size", type=int, default=[3, 3], nargs="+", help="the size of the blind spot")
     parser.add_argument("--bp", action="store_true", help="blind plane")
+    parser.add_argument("--is_raw", action="store_true", default=False, help="use anisotropic dilations for raw voltage imaging data (Y minimal, X exponential). Default: False (uses processed/reconstructed data)")
+    parser.add_argument("--align_data", action="store_true", default=False, help="whether to align raw voltage imaging data (only used with --is_raw)")
+    parser.add_argument("--alignment_method", type=str, default="peaks", help="alignment method: 'peaks' or other methods")
+    parser.add_argument("--alignment_kwargs", type=dict, default={}, help="additional kwargs for alignment method")
     parser.add_argument("--unet_channels", type=int, default=[64, 128, 256, 512, 1024], nargs="+", help="the number of channels of UNet")
 
     # training
@@ -143,11 +187,33 @@ def update_opt(opt):
 
     if not opt.is_zarr:
         if opt.is_folder:
+            import random
             all_files = []
 
             for i in opt.noisy_data:
-                all_files += sorted([str(p) for p in Path(i).rglob('*') if p.is_file()])
-
+                # Recursively find all .tif files
+                tif_files = sorted([str(p) for p in Path(i).rglob('*.tif') if p.is_file()])
+                
+                # Filter based on is_raw flag
+                if hasattr(opt, 'is_raw') and opt.is_raw:
+                    # For raw data: exclude files with 'reconstructed' in name
+                    tif_files = [f for f in tif_files if 'reconstructed' not in Path(f).name]
+                else:
+                    # For processed data: only include files with 'reconstructed' in name
+                    tif_files = [f for f in tif_files if 'reconstructed' in Path(f).name]
+                
+                all_files += tif_files
+            
+            # Randomly select subset if training_size is specified
+            if hasattr(opt, 'training_size') and opt.training_size is not None:
+                if opt.training_size < len(all_files):
+                    random.seed(opt.random_seed)  # Use random seed for reproducibility
+                    all_files = random.sample(all_files, opt.training_size)
+                    all_files = sorted(all_files)  # Re-sort for consistency
+                else:
+                    # User requested more files than available
+                    print(f"WARNING: Requested {opt.training_size} files, but only {len(all_files)} available. Using all {len(all_files)} files.")
+            
             opt.noisy_data = all_files
     else:
         if opt.is_folder:
@@ -159,6 +225,18 @@ def update_opt(opt):
                             all_dirs.append(os.path.join(root, d))
                     dirs[:] = [d for d in dirs if not d.endswith(".zarr")]
             opt.noisy_data = sorted(all_dirs)
+
+    # Print file selection summary
+    print("=" * 70)
+    print("FILE SELECTION SUMMARY")
+    print("=" * 70)
+    filter_type = "raw (excluding 'reconstructed')" if (hasattr(opt, 'is_raw') and opt.is_raw) else "processed (only 'reconstructed')"
+    print(f"Filter mode: {filter_type}")
+    if hasattr(opt, 'training_size') and opt.training_size is not None:
+        print(f"Requested training size: {opt.training_size} files")
+    print(f"Total files selected: {len(opt.noisy_data)}")
+    print("=" * 70)
+    print()
 
     # print the noisy files
     print("Noisy files:")
