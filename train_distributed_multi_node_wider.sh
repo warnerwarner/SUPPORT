@@ -38,10 +38,14 @@ echo "=========================================="
 echo ""
 
 # Training parameters
-data_dir="/gpfs/home/warnet02/data/stephen"
-n_epochs=20
-exp_name="stephenvoltage_if_61_bs_1_wider_1.5x_20epochs"
+data_dir="/gpfs/home/warnet02/data/stephen/zarr"
+n_epochs=50
+exp_name="stephenvoltage_if_61_bs_1_wider_1.5x_50epochs_80l1_20l2"
 checkpoint_interval=5  # Match original training (save every 5 epochs)
+
+export NCCL_TIMEOUT=1800
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_IB_TIMEOUT=50
 
 # Change to project directory
 cd /gpfs/data/shohamlab/tom/support
@@ -55,21 +59,23 @@ srun /gpfs/data/shohamlab/tom/voltage_imaging/.pixi/envs/default/bin/python \
     --is_folder \
     --noisy_data "$data_dir" \
     --n_epochs "$n_epochs" \
-    --batch_size 16 \
+    --batch_size 8 \
     --patch_size 61 16 320 \
-    --patch_interval 1 4 160 \
+    --patch_interval 10 4 160 \
     --checkpoint_interval "$checkpoint_interval" \
     --depth 8 \
     --bs_size 1 1 \
     --is_raw \
-    --training_size 10 \
+    --training_size 100 \
     --use_amp \
     --n_cpu 7 \
     --blind_conv_channels 96 \
     --unet_channels 96 192 384 768 1536 \
     --one_by_one_channels 48 24 \
-    --last_layer_channels 96 48 24
-
+    --last_layer_channels 96 48 24 \
+    --epoch 16 \
+    --loss_coef 0.8 0.2 \
+    --is_zarr
 echo ""
 echo "=========================================="
 echo "Job completed at: $(date)"
