@@ -335,6 +335,7 @@ if __name__ == "__main__":
         bs_size=opt.bs_size,
         bp=opt.bp,
         is_raw=opt.is_raw,
+        prevent_injection=opt.prevent_injection,
     )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr)
@@ -344,7 +345,12 @@ if __name__ == "__main__":
     if cuda:
         model = model.cuda(local_rank)
         # Wrap with DistributedDataParallel
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=opt.prevent_injection,
+        )
         if rank == 0:
             print(f"Model wrapped with DistributedDataParallel")
             print(f"Model device: cuda:{local_rank}")

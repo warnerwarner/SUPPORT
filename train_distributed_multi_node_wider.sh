@@ -40,7 +40,7 @@ echo ""
 # Training parameters
 data_dir="/gpfs/home/warnet02/data/stephen/zarr"
 n_epochs=50
-exp_name="stephenvoltage_if_61_bs_1_wider_1.5x_50epochs_80l1_20l2"
+exp_name="stephenvoltage_if_61_bs_1_wider_1.5x_50epochs_80l1_20l2_recon"
 checkpoint_interval=5  # Match original training (save every 5 epochs)
 
 export NCCL_TIMEOUT=1800
@@ -52,6 +52,11 @@ cd /gpfs/data/shohamlab/tom/support
 
 # Launch distributed training across all nodes
 # srun automatically distributes tasks across nodes
+# patch for raw is 61 16 320
+
+# sleep for 10 mins
+echo "Waiting 10 minutes for zarr conversion to finish"
+sleep 600
 
 srun /gpfs/data/shohamlab/tom/voltage_imaging/.pixi/envs/default/bin/python \
     -u -m src.train_distributed \
@@ -60,12 +65,11 @@ srun /gpfs/data/shohamlab/tom/voltage_imaging/.pixi/envs/default/bin/python \
     --noisy_data "$data_dir" \
     --n_epochs "$n_epochs" \
     --batch_size 8 \
-    --patch_size 61 16 320 \
-    --patch_interval 10 4 160 \
+    --patch_size 61 32 32 \
+    --patch_interval 10 8 8 \
     --checkpoint_interval "$checkpoint_interval" \
     --depth 8 \
     --bs_size 1 1 \
-    --is_raw \
     --training_size 100 \
     --use_amp \
     --n_cpu 7 \
@@ -73,7 +77,6 @@ srun /gpfs/data/shohamlab/tom/voltage_imaging/.pixi/envs/default/bin/python \
     --unet_channels 96 192 384 768 1536 \
     --one_by_one_channels 48 24 \
     --last_layer_channels 96 48 24 \
-    --epoch 16 \
     --loss_coef 0.8 0.2 \
     --is_zarr
 echo ""

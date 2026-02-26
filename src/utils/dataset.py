@@ -773,7 +773,10 @@ def gen_train_dataloader(
                 noisy_images_train.append(noisy_image)
             else:
                 zarr_data = zarr.open(noisy_data, mode="r")
-                noisy_image = zarr_data["eod"]
+                if is_raw:
+                    noisy_image = zarr_data["eod"]
+                else:
+                    noisy_image = zarr_data["reconstructed"]
                 print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")
                 noisy_images_train.append(noisy_image)
 

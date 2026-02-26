@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --partition=gpu4_medium
-#SBATCH --nodes=5
+#SBATCH --nodes=2
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=7
 #SBATCH --mem=120G
 #SBATCH --gres=gpu:v100:4
-#SBATCH --time=3-00:00:00
-#SBATCH --job-name=SUPPORT_DDP_20gpu
+#SBATCH --time=1-00:00:00
+#SBATCH --job-name=SUPPORT_DDP_TRAIN
 #SBATCH --output=/gpfs/home/warnet02/shohamlab/tom/tmp/%j.log
 #SBATCH --error=/gpfs/home/warnet02/shohamlab/tom/tmp/%j.err
 #SBATCH --mail-type=END,FAIL,BEGIN
-#SBATCH --mail-user=tom.warner@nyulangone.org
+#SBATCH --mail-user=tom.warner@nyulangone.org,9145136289@tmomail.net,9145136289@mailmymobile.net
 
 # Get the master node hostname (first node in allocation)
 export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n 1)
@@ -33,7 +33,7 @@ echo ""
 # Training parameters
 data_dir="/gpfs/home/warnet02/data/stephen"
 n_epochs=20
-exp_name="stephenvoltage_if_61_bs_1_bigger_context_window_multi_node"
+exp_name="stephenvoltage_if_61_bs_2_2"
 checkpoint_interval=5  # Match original training (save every 5 epochs)
 
 # Change to project directory
@@ -50,14 +50,17 @@ srun /gpfs/data/shohamlab/tom/voltage_imaging/.pixi/envs/default/bin/python \
     --n_epochs "$n_epochs" \
     --batch_size 16 \
     --patch_size 61 16 320 \
-    --patch_interval 1 4 160 \
+    --patch_interval 10 4 160 \
     --checkpoint_interval "$checkpoint_interval" \
-    --depth 8 \
-    --bs_size 1 1 \
+    --depth 5 \
+    --bs_size 2 2 \
     --is_raw \
-    --training_size 10 \
+    --is_zarr \
+    --training_size 50 \
     --use_amp \
-    --n_cpu 7
+    --n_cpu 7 \
+    --loss_coef 0.7 0.3
+
 echo ""
 echo "=========================================="
 echo "Job completed at: $(date)"
