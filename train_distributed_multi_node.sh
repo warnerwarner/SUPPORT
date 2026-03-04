@@ -33,7 +33,7 @@ echo ""
 # Training parameters
 data_dir="/gpfs/home/warnet02/data/stephen"
 n_epochs=20
-exp_name="stephenvoltage_if_61_bs_2_2"
+exp_name="stephenvoltage_if_61_bs_2_2_l107l203"
 checkpoint_interval=5  # Match original training (save every 5 epochs)
 
 # Change to project directory
@@ -52,11 +52,11 @@ srun /gpfs/data/shohamlab/tom/voltage_imaging/.pixi/envs/default/bin/python \
     --patch_size 61 16 320 \
     --patch_interval 10 4 160 \
     --checkpoint_interval "$checkpoint_interval" \
-    --depth 5 \
+    --depth 8 \
     --bs_size 2 2 \
     --is_raw \
     --is_zarr \
-    --training_size 50 \
+    --training_size 20 \
     --use_amp \
     --n_cpu 7 \
     --loss_coef 0.7 0.3

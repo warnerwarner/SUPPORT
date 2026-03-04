@@ -6,7 +6,7 @@ import random
 from pathlib import Path
 
 
-def parse_arguments(empty=False):
+def parse_arguments(args=None):
 
     parser = argparse.ArgumentParser()
     # experiment
@@ -213,8 +213,13 @@ def parse_arguments(empty=False):
         default=1,
         help="rolling mean to apply prior to training",
     )
-    if empty:
-        opt = parser.parse_args(args=[])
+    parser.add_argument(
+        "--use_phase_conditioning",
+        action="store_true",
+        help="Use phase conditioning in the model",
+    )
+    if args is not None:
+        opt = parser.parse_args(args=args)
     else:
         opt = parser.parse_args()
 

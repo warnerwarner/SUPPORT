@@ -97,16 +97,36 @@ def train(
 
     # training
     for i, data in enumerate(dataloader_iter):
-        if opt.is_zarr:
+        if opt.is_zarr and opt.use_phase_conditioning:
+            (
+                noisy_image,
+                _,
+                ds_idx,
+                noisy_image_avg,
+                noisy_image_std,
+                phase_sin,
+                phase_cos,
+            ) = data
+            phase_sin = phase_sin.cuda()
+            phase_cos = phase_cos.cuda()
+            noisy_image_avg = torch.reshape(noisy_image_avg, (-1, 1, 1, 1))
+            noisy_image_std = torch.reshape(noisy_image_std, (-1, 1, 1, 1))
+        elif opt.is_zarr:
             (noisy_image, _, ds_idx, noisy_image_avg, noisy_image_std) = data
             noisy_image_avg = torch.reshape(noisy_image_avg, (-1, 1, 1, 1))
             noisy_image_std = torch.reshape(noisy_image_std, (-1, 1, 1, 1))
+            phase_sin = None
+            phase_cos = None
         else:
             (noisy_image, _, ds_idx) = data
+            phase_sin = None
+            phase_cos = None
 
         B, T, X, Y = noisy_image.shape
         noisy_image = noisy_image.cuda()
-        noisy_image, _ = random_transform(noisy_image, None, rng, is_rotate)
+        noisy_image, _, phase_sin, phase_cos = random_transform(
+            noisy_image, None, rng, is_rotate, phase_sin=phase_sin, phase_cos=phase_cos
+        )
         if opt.is_zarr:
             noisy_image_avg = noisy_image_avg.cuda()
             noisy_image_std = noisy_image_std.cuda()
@@ -116,7 +136,7 @@ def train(
         optimizer.zero_grad()
         # Forward pass wrapped in autocast for AMP
         with torch.cuda.amp.autocast(enabled=opt.use_amp):
-            noisy_image_denoised = model(noisy_image)
+            noisy_image_denoised = model(noisy_image, phase_sin, phase_cos)
             loss_l1_pixelwise = L1_pixelwise(noisy_image_denoised, noisy_image_target)
             loss_l2_pixelwise = L2_pixelwise(noisy_image_denoised, noisy_image_target)
             loss_sum = (
@@ -154,7 +174,7 @@ def train(
             )
 
             logging.info(
-                f"[{ts}] Epoch [{epoch}/{opt.n_epochs}] Batch [{i+1}/{len(train_dataloader)}] "
+                f"[{ts}] Epoch [{epoch}/{opt.n_epochs}] Batch [{i + 1}/{len(train_dataloader)}] "
                 + f"loss : {loss_mean:.4f}, loss_l1 : {loss_mean_l1:.4f}, loss_l2 : {loss_mean_l2:.4f} "
                 + f"[{world_size} GPUs]"
             )
@@ -265,6 +285,7 @@ if __name__ == "__main__":
         is_zarr=opt.is_zarr,
         is_raw=opt.is_raw,
         rank=rank,  # Pass rank for distributed cache synchronization
+        use_phase_conditioning=opt.use_phase_conditioning,
     )
     dist.barrier()
     if rank == 0:
@@ -336,6 +357,7 @@ if __name__ == "__main__":
         bp=opt.bp,
         is_raw=opt.is_raw,
         prevent_injection=opt.prevent_injection,
+        use_phase_conditioning=opt.use_phase_conditioning,
     )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr)

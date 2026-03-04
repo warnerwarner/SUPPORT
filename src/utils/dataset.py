@@ -6,6 +6,7 @@ import zarr
 import pickle
 import os
 import hashlib
+from scipy.signal import hilbert
 
 from tqdm import tqdm, trange
 from torch.utils.data import Dataset, DataLoader
@@ -13,7 +14,35 @@ from src.utils.util import get_coordinate
 from src.utils.alignment import align_data
 
 
-def random_transform(input, target, rng, is_rotate=True):
+def extract_phase(position_signal):
+    """
+    Extract phase from sinusoidal position signal using Hilbert transform.
+
+    Args:
+        position_signal: (T, H, W) numpy array with sinusoids along W dimension
+
+    Returns:
+        phase_sin, phase_cos: (T, H) tensors - sin/cos of phase for continuity
+    """
+    from scipy.signal import hilbert
+
+    T, H, W = position_signal.shape
+
+    # Vectorized Hilbert transform along the W dimension (axis=2)
+    analytic = hilbert(position_signal, axis=2)
+
+    # Get phase at the center pixel
+    phase = np.angle(analytic[:, :, W // 2])
+
+    phase_sin = np.sin(phase)
+    phase_cos = np.cos(phase)
+
+    return phase_sin, phase_cos
+
+
+def random_transform(
+    input, target, rng, is_rotate=True, phase_sin=None, phase_cos=None
+):
     """
     Randomly rotate/flip the image
 
@@ -21,15 +50,22 @@ def random_transform(input, target, rng, is_rotate=True):
         input: input image stack (Pytorch Tensor with dimension [b, T, X, Y])
         target: targer image stack (Pytorch Tensor with dimension [b, T, X, Y]), can be None
         rng: numpy random number generator
+        is_rotate: whether to allow 90-degree rotations
+        phase_sin: optional phase sin tensor (Pytorch Tensor with dimension [b, T, H])
+        phase_cos: optional phase cos tensor (Pytorch Tensor with dimension [b, T, H])
 
     Returns:
         input: randomly rotated/flipped input image stack (Pytorch Tensor with dimension [b, T, X, Y])
         target: randomly rotated/flipped target image stack (Pytorch Tensor with dimension [b, T, X, Y])
+        phase_sin: flipped phase sin tensor if provided, else None
+        phase_cos: flipped phase cos tensor if provided, else None
     """
     rand_num = rng.integers(0, 4)  # random number for rotation
     rand_num_2 = rng.integers(0, 2)  # random number for flip
 
-    if is_rotate:
+    # Disable rotations when phase conditioning is active — phase is per-row
+    # and rotation would mix row/column dimensions, making phase meaningless.
+    if is_rotate and phase_sin is None:
         if rand_num == 1:
             input = torch.rot90(input, k=1, dims=(2, 3))
             if target is not None:
@@ -44,11 +80,16 @@ def random_transform(input, target, rng, is_rotate=True):
                 target = torch.rot90(target, k=3, dims=(2, 3))
 
     if rand_num_2 == 1:
+        # Flip along dim 2 (row axis) of the image
         input = torch.flip(input, dims=[2])
         if target is not None:
             target = torch.flip(target, dims=[2])
+        # Flip phase along its row axis (dim 2) to match — phase is (B, T, H)
+        if phase_sin is not None:
+            phase_sin = torch.flip(phase_sin, dims=[2])
+            phase_cos = torch.flip(phase_cos, dims=[2])
 
-    return input, target
+    return input, target, phase_sin, phase_cos
 
 
 def normalize(image):
@@ -449,6 +490,8 @@ class DatasetSUPPORT(Dataset):
         transform=None,
         random_patch=True,
         random_patch_seed=0,
+        phase_sin_list=None,
+        phase_cos_list=None,
     ):
         """
         Arguments:
@@ -482,6 +525,8 @@ class DatasetSUPPORT(Dataset):
         self.patch_rng = np.random.default_rng(random_patch_seed)
         self.precomputed_indices = None
         self.load_to_memory = load_to_memory
+        self.phase_sin_list = phase_sin_list
+        self.phase_cos_list = phase_cos_list
 
         self.noisy_images = noisy_images
         self.mean_images = []
@@ -515,6 +560,12 @@ class DatasetSUPPORT(Dataset):
                     z_range.append(tmp_size[k] - self.patch_size[k])
                 indices.append(z_range)
             self.indices_ds.append(indices)
+
+        if self.random_patch:
+            self.precompute_indices()
+            print(
+                f"✓ Random patch indices computed for {len(self.precomputed_indices)} patches"
+            )
 
     def precompute_indices(self):
         """
@@ -594,23 +645,50 @@ class DatasetSUPPORT(Dataset):
         if self.load_to_memory:
             noisy_image = self.noisy_images[ds_idx][t_range, y_range, z_range]
         else:
+            if self.phase_sin_list is not None:
+                # Phase has shape (T_full, H) — slice matching time and row dims
+                # Returns (T_patch, H_patch); forward() splits into U-Net and BS-net portions
+                phase_sin = self.phase_sin_list[ds_idx][t_range, y_range]
+                phase_cos = self.phase_cos_list[ds_idx][t_range, y_range]
+                phase_sin = torch.tensor(phase_sin, dtype=torch.float32)
+                phase_cos = torch.tensor(phase_cos, dtype=torch.float32)
+            else:
+                phase_sin = None
+                phase_cos = None
             noisy_image_avg = torch.tensor(self.noisy_images[ds_idx].attrs["mean"])
             noisy_image_std = torch.tensor(self.noisy_images[ds_idx].attrs["std"])
             noisy_image = self.noisy_images[ds_idx][t_range, y_range, z_range]
             noisy_image = torch.tensor(noisy_image, dtype=torch.float32)
-            return (
-                noisy_image,
-                torch.tensor(
-                    [
-                        [t_idx, t_idx + self.patch_size[0]],
-                        [y_idx, y_idx + self.patch_size[1]],
-                        [z_idx, z_idx + self.patch_size[2]],
-                    ]
-                ),
-                torch.tensor(ds_idx),
-                noisy_image_avg,
-                noisy_image_std,
-            )
+            if self.phase_sin_list is not None:
+                return (
+                    noisy_image,
+                    torch.tensor(
+                        [
+                            [t_idx, t_idx + self.patch_size[0]],
+                            [y_idx, y_idx + self.patch_size[1]],
+                            [z_idx, z_idx + self.patch_size[2]],
+                        ]
+                    ),
+                    torch.tensor(ds_idx),
+                    noisy_image_avg,
+                    noisy_image_std,
+                    phase_sin,
+                    phase_cos,
+                )
+            else:
+                return (
+                    noisy_image,
+                    torch.tensor(
+                        [
+                            [t_idx, t_idx + self.patch_size[0]],
+                            [y_idx, y_idx + self.patch_size[1]],
+                            [z_idx, z_idx + self.patch_size[2]],
+                        ]
+                    ),
+                    torch.tensor(ds_idx),
+                    noisy_image_avg,
+                    noisy_image_std,
+                )
 
         return (
             noisy_image,
@@ -710,6 +788,7 @@ def gen_train_dataloader(
     is_zarr=False,
     is_raw=False,
     rank=0,
+    use_phase_conditioning=False,
 ):
     """
     Generate dataloader for training
@@ -764,6 +843,8 @@ def gen_train_dataloader(
     else:
         # Original eager-loading behavior
         noisy_images_train = []
+        phase_sin_list = [] if use_phase_conditioning else None
+        phase_cos_list = [] if use_phase_conditioning else None
 
         for noisy_data in noisy_data_list:
             if not is_zarr:
@@ -775,6 +856,11 @@ def gen_train_dataloader(
                 zarr_data = zarr.open(noisy_data, mode="r")
                 if is_raw:
                     noisy_image = zarr_data["eod"]
+                    if use_phase_conditioning:
+                        position_signal = zarr_data["position"][:]
+                        phase_sin, phase_cos = extract_phase(position_signal)
+                        phase_sin_list.append(phase_sin)
+                        phase_cos_list.append(phase_cos)
                 else:
                     noisy_image = zarr_data["reconstructed"]
                 print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")
@@ -787,6 +873,8 @@ def gen_train_dataloader(
             transform=None,
             random_patch=True,
             load_to_memory=not is_zarr,
+            phase_sin_list=phase_sin_list,
+            phase_cos_list=phase_cos_list,
         )
 
     # Create DataLoader (same for both lazy and eager loading)

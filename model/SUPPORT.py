@@ -25,6 +25,7 @@ class SUPPORT(nn.Module):
         bp=False,
         is_raw=False,
         prevent_injection=False,
+        use_phase_conditioning=False,
     ):
         super(SUPPORT, self).__init__()
 
@@ -57,14 +58,16 @@ class SUPPORT(nn.Module):
 
         self.bp = bp
         self.is_raw = is_raw
+        self.use_phase_conditioning = use_phase_conditioning
+
         if in_channels == 1:
             self.twod = True
         else:
             self.twod = False
 
-        assert not (
-            self.bp and self.twod
-        ), "two options cannot be selected in same time."
+        assert not (self.bp and self.twod), (
+            "two options cannot be selected in same time."
+        )
 
         # initialize
         self.relu = nn.ReLU()
@@ -101,12 +104,18 @@ class SUPPORT(nn.Module):
 
     def _gen_unet(self):
         # (Unet) encoding layers
+        # When phase conditioning is enabled, we concatenate sin+cos phase channels
+        # for each non-center frame: (T-1) image + (T-1) sin + (T-1) cos = 3*(T-1)
+        unet_in_channels = self.in_channels - 1
+        if self.use_phase_conditioning:
+            unet_in_channels = 3 * (self.in_channels - 1)
+
         self.enc_layers = []
         for i in range(len(self.mid_channels)):
             if i == 0:
                 self.enc_layers.append(
                     nn.Conv2d(
-                        self.in_channels - 1,
+                        unet_in_channels,
                         self.mid_channels[i],
                         kernel_size=3,
                         padding=1,
@@ -168,9 +177,14 @@ class SUPPORT(nn.Module):
 
         # (BS) first layer to process Unet output
         conv3x3 = []
+        # Calculate input channels: UNet output + 2 (sin/cos of center-frame row phase)
+        bs_in_channels = self.one_by_one_channels[-1]
+        if self.use_phase_conditioning:
+            bs_in_channels += 2
+
         conv3x3.append(
             nn.Conv2d(
-                self.one_by_one_channels[-1],
+                bs_in_channels,
                 self.blind_conv_channels,
                 kernel_size=3,
                 stride=1,
@@ -186,7 +200,7 @@ class SUPPORT(nn.Module):
         conv5x5 = []
         conv5x5.append(
             nn.Conv2d(
-                self.one_by_one_channels[-1],
+                bs_in_channels,
                 self.blind_conv_channels,
                 kernel_size=5,
                 stride=1,
@@ -306,18 +320,27 @@ class SUPPORT(nn.Module):
 
         return x
 
-    def forward_bsnet(self, x, unet_out):
+    def forward_bsnet(self, x, unet_out, phase_sin=None, phase_cos=None):
         # x : bsnet input
         # unet_out : unet output
 
         hc = []
 
         if unet_out is not None:
+            # Concatenate phase info if enabled
+            if self.use_phase_conditioning and phase_sin is not None:
+                # phase_sin, phase_cos: (B, H) — one phase per row for the center frame
+                # Reshape to (B, 1, H, 1) and broadcast to (B, 1, H, W)
+                B, C, H, W = unet_out.shape
+                p_sin = phase_sin.unsqueeze(1).unsqueeze(-1).expand(B, 1, H, W)
+                p_cos = phase_cos.unsqueeze(1).unsqueeze(-1).expand(B, 1, H, W)
+                # Concatenate along the channel dimension: adds 2 channels
+                unet_out = torch.cat([unet_out, p_sin, p_cos], dim=1)
+
             unet_out1 = self.conv3x3[0](unet_out)
             unet_out1 = self.conv3x3[1](unet_out1)
 
         for c in range(self.depth3x3):
-
             if c == 0:
                 x1 = x
             else:
@@ -376,28 +399,57 @@ class SUPPORT(nn.Module):
 
         return x
 
-    def forward(self, x):
-        # x = [b, T, d1, d2]
-        # d1, d2 = 512, paper reference
+    def forward(self, x, phase_sin=None, phase_cos=None):
+        # x = [B, T, H, W]
+        # phase_sin, phase_cos = [B, T, H] (per-row phase for all frames in patch)
+
+        center = self.in_channels // 2
 
         unet_in = torch.cat(
             [
-                x[:, : self.in_channels // 2, :, :],
-                x[:, self.in_channels // 2 + 1 :, :, :],
+                x[:, :center, :, :],
+                x[:, center + 1 :, :, :],
             ],
             dim=1,
         )
-        bsnet_in = torch.unsqueeze(x[:, self.in_channels // 2, :, :], dim=1)
+        bsnet_in = torch.unsqueeze(x[:, center, :, :], dim=1)
+
+        # Split phase into U-Net portion (non-center frames) and BS-net portion (center frame)
+        unet_phase_sin = None
+        unet_phase_cos = None
+        bsnet_phase_sin = None
+        bsnet_phase_cos = None
+
+        if self.use_phase_conditioning and phase_sin is not None:
+            # phase_sin/cos: (B, T, H) -> split like the image channels
+            # U-Net gets non-center frames: (B, T-1, H)
+            unet_phase_sin = torch.cat(
+                [phase_sin[:, :center, :], phase_sin[:, center + 1 :, :]], dim=1
+            )
+            unet_phase_cos = torch.cat(
+                [phase_cos[:, :center, :], phase_cos[:, center + 1 :, :]], dim=1
+            )
+            # BS-net gets center frame only: (B, H)
+            bsnet_phase_sin = phase_sin[:, center, :]
+            bsnet_phase_cos = phase_cos[:, center, :]
+
+            # Broadcast U-Net phase from (B, T-1, H) to (B, T-1, H, W) and concat
+            B, T_minus_1, H, W = unet_in.shape
+            u_sin = unet_phase_sin.unsqueeze(-1).expand(B, T_minus_1, H, W)
+            u_cos = unet_phase_cos.unsqueeze(-1).expand(B, T_minus_1, H, W)
+            unet_in = torch.cat([unet_in, u_sin, u_cos], dim=1)
 
         if self.bp:
             unet_out = self.forward_unet(unet_in)
             x = unet_out
         elif self.twod:
             unet_out = None
-            x = self.forward_bsnet(bsnet_in, unet_out)
+            x = self.forward_bsnet(bsnet_in, unet_out, bsnet_phase_sin, bsnet_phase_cos)
         else:
             unet_out = self.forward_unet(unet_in)
-            bsnet_out = self.forward_bsnet(bsnet_in, unet_out)
+            bsnet_out = self.forward_bsnet(
+                bsnet_in, unet_out, bsnet_phase_sin, bsnet_phase_cos
+            )
 
             x = torch.cat([unet_out, bsnet_out], dim=1)
 
