@@ -13,8 +13,15 @@ from torch.utils.data import Dataset, DataLoader
 from src.utils.util import get_coordinate
 from src.utils.alignment import align_data
 
+try:
+    import torch
 
-def extract_phase(position_signal):
+    PYTORCH_AVAILABLE = True
+except ImportError:
+    PYTORCH_AVAILABLE = False
+
+
+def _extract_phase_cpu(position_signal):
     """
     Extract phase from sinusoidal position signal using Hilbert transform.
 
@@ -24,7 +31,6 @@ def extract_phase(position_signal):
     Returns:
         phase_sin, phase_cos: (T, H) tensors - sin/cos of phase for continuity
     """
-    from scipy.signal import hilbert
 
     T, H, W = position_signal.shape
 
@@ -38,6 +44,72 @@ def extract_phase(position_signal):
     phase_cos = np.cos(phase)
 
     return phase_sin, phase_cos
+
+
+def _extract_phase_gpu(position_signal, batches=10):
+    """
+    GPU-accelerated version of phase extraction using PyTorch.
+
+    Args:
+        position_signal: (T, H, W) numpy array with sinusoids along W dimension
+        batches: number of batches to split the data into for GPU processing (int)
+    Returns:
+        phase_sin, phase_cos: (T, H) tensors - sin/cos of phase for continuity
+    """
+    phase_sin_list = []
+    phase_cos_list = []
+    batch_size = position_signal.shape[0] // batches
+    if isinstance(position_signal, np.ndarray):
+        chunks = np.array_split(position_signal, batches, axis=0)
+    elif isinstance(position_signal, torch.Tensor):
+        chunks = torch.tensor_split(position_signal, batches, dim=0)
+    else:
+        raise TypeError(f"Unsupported type: {type(position_signal)}")
+    for batch_signal in tqdm(chunks):
+        if isinstance(position_signal, np.ndarray):
+            batch_signal = torch.from_numpy(batch_signal.astype(np.float32)).cuda()
+        elif not batch_signal.is_cuda:
+            batch_signal = batch_signal.float().cuda()
+        analytic = hilbert_torch(batch_signal, axis=2)
+        phase = torch.angle(analytic[:, :, analytic.shape[2] // 2])
+        phase_sin = torch.sin(phase)
+        phase_cos = torch.cos(phase)
+        phase_sin_list.append(phase_sin)
+        phase_cos_list.append(phase_cos)
+    phase_sin = torch.cat(phase_sin_list, dim=0)
+    phase_cos = torch.cat(phase_cos_list, dim=0)
+    return phase_sin, phase_cos
+
+
+def extract_phase(position_signal):
+    """
+    Extract phase from sinusoidal position signal using Hilbert transform.
+    Automatically chooses GPU or CPU implementation based on availability.
+
+    Args:
+        position_signal: (T, H, W) numpy array with sinusoids along W dimension
+    Returns:
+        phase_sin, phase_cos: (T, H) tensors - sin/cos of phase for continuity
+    """
+    if PYTORCH_AVAILABLE and torch.cuda.is_available():
+        return _extract_phase_gpu(position_signal)
+    else:
+        return _extract_phase_cpu(position_signal)
+
+
+def hilbert_torch(x, axis=-1):
+    N = x.shape[axis]
+    Xf = torch.fft.fft(x, dim=axis)
+    h = torch.zeros(N, dtype=Xf.dtype, device=x.device)
+    if N % 2 == 0:
+        h[0] = 1
+        h[1 : N // 2] = 2
+        h[N // 2] = 1
+    else:
+        h[0] = 1
+        h[1 : (N + 1) // 2] = 2
+    Xf = Xf * h
+    return torch.fft.ifft(Xf, dim=axis)
 
 
 def random_transform(
@@ -285,201 +357,6 @@ def _load_or_compute_normalization_stats(
     return mean_std_dict
 
 
-class DatasetSUPPORT_Lazy(Dataset):
-    """
-    Lazy-loading version of DatasetSUPPORT for .tif files.
-    Instead of loading all files into memory, loads files on-demand during training.
-    Caches the most recently loaded file per worker to reduce redundant I/O.
-    """
-
-    def __init__(
-        self,
-        file_paths,
-        mean_std_dict,
-        patch_size=[61, 128, 128],
-        patch_interval=[10, 64, 64],
-        is_raw=False,
-        opt=None,
-        transform=None,
-        random_patch=True,
-        random_patch_seed=0,
-    ):
-        """
-        Arguments:
-            file_paths: list of file paths (list of str)
-            mean_std_dict: dict mapping file_path -> (mean, std)
-            patch_size: size of the patch ([int]), ([t, x, y])
-            patch_interval: interval between each patch ([int]), ([t, x, y])
-            is_raw: whether files are raw voltage imaging data (bool)
-            opt: options object with align_data, rolling_mean, etc.
-            transform: function of transformation (function)
-            random_patch: sample patch in random or not (bool)
-            random_patch_seed: seed for randomness (int)
-        """
-        # Check arguments
-        if len(patch_size) != 3:
-            raise Exception("length of patch_size must be 3")
-        if len(patch_interval) != 3:
-            raise Exception("length of patch_interval must be 3")
-
-        self.file_paths = file_paths
-        self.mean_std_dict = mean_std_dict
-        self.patch_size = patch_size
-        self.patch_interval = patch_interval
-        self.is_raw = is_raw
-        self.opt = opt
-        self.transform = transform
-        self.random_patch = random_patch
-        self.patch_rng = np.random.default_rng(random_patch_seed)
-        self.precomputed_indices = None
-
-        # Cache for most recently loaded file (per worker process)
-        self._cached_file_path = None
-        self._cached_file_data = None
-
-        # Pre-compute file shapes and valid patch indices
-        # Need to load each file once to get shape
-        print(f"Pre-computing patch indices for {len(file_paths)} files...")
-        self.file_shapes = []
-        self.indices_ds = []
-        self.data_weight = []
-
-        for file_path in tqdm(file_paths, desc="Loading file shapes"):
-            # Load file to get shape (will be cached for first batch)
-            noisy_image = self._load_and_normalize(file_path)
-            shape = noisy_image.shape
-            self.file_shapes.append(shape)
-            self.data_weight.append(np.prod(shape))
-
-            # Compute valid patch indices for this file
-            indices = []
-            if np.any(np.array(shape) < np.array(self.patch_size)):
-                raise Exception(
-                    f"Patch size {self.patch_size} is larger than data size {shape} for file {file_path}"
-                )
-
-            for k in range(3):
-                z_range = list(
-                    range(0, shape[k] - self.patch_size[k] + 1, self.patch_interval[k])
-                )
-                if shape[k] - self.patch_size[k] > z_range[-1]:
-                    z_range.append(shape[k] - self.patch_size[k])
-                indices.append(z_range)
-            self.indices_ds.append(indices)
-
-        print(f"✓ Patch indices computed for {len(file_paths)} files")
-        if self.random_patch:
-            self.precompute_indices()
-            print(
-                f"✓ Random patch indices computed for {len(self.precomputed_indices)} patches"
-            )
-
-        means = [self.mean_std_dict[fp][0] for fp in self.file_paths]
-        stds = [self.mean_std_dict[fp][1] for fp in self.file_paths]
-        self.mean_images = torch.tensor(means)
-        self.std_images = torch.tensor(stds)
-
-    def _load_and_normalize(self, file_path):
-        """Load a single file and apply normalization using cached mean/std"""
-        # Load file
-        noisy_image = _load_tif_file(file_path, self.is_raw, self.opt)
-
-        # Apply normalization using cached statistics
-        mean_val, std_val = self.mean_std_dict[file_path]
-        noisy_image -= mean_val
-        noisy_image /= std_val
-
-        return noisy_image
-
-    def precompute_indices(self):
-        """
-        Precompute random patch indices for each file.
-        Called once per epoch to generate new random patches.
-        """
-        precomputed_indices = []
-
-        for ds_idx, file_path in enumerate(self.file_paths):
-            shape = self.file_shapes[ds_idx]
-            indices_lists = self.indices_ds[ds_idx]
-            count_i = (
-                len(indices_lists[0]) * len(indices_lists[1]) * len(indices_lists[2])
-            )
-
-            # Calculate valid range for each dimension
-            t_range = shape[0] - self.patch_size[0] + 1
-            y_range = shape[1] - self.patch_size[1] + 1
-            z_range = shape[2] - self.patch_size[2] + 1
-
-            # Generate random indices
-            t_indices = self.patch_rng.integers(0, t_range, size=count_i)
-            y_indices = self.patch_rng.integers(0, y_range, size=count_i)
-            z_indices = self.patch_rng.integers(0, z_range, size=count_i)
-
-            indices_for_file = [
-                (ds_idx, int(t), int(y), int(z))
-                for t, y, z in zip(t_indices, y_indices, z_indices)
-            ]
-            precomputed_indices.extend(indices_for_file)
-
-        # Shuffle to randomize order
-        self.patch_rng.shuffle(precomputed_indices)
-        self.precomputed_indices = precomputed_indices
-
-    def __len__(self):
-        total = 0
-        for indices in self.indices_ds:
-            total += len(indices[0]) * len(indices[1]) * len(indices[2])
-        return total
-
-    def __getitem__(self, i):
-        """Load patch on-demand from disk"""
-        # Get patch location
-        if self.random_patch:
-            ds_idx, t_idx, y_idx, z_idx = self.precomputed_indices[i]
-        else:
-            ds_idx = 0
-            t_idx = self.indices_ds[ds_idx][0][
-                i // (len(self.indices_ds[ds_idx][1]) * len(self.indices_ds[ds_idx][2]))
-            ]
-            y_idx = self.indices_ds[ds_idx][1][
-                (
-                    i
-                    % (
-                        len(self.indices_ds[ds_idx][1])
-                        * len(self.indices_ds[ds_idx][2])
-                    )
-                )
-                // len(self.indices_ds[ds_idx][2])
-            ]
-            z_idx = self.indices_ds[ds_idx][2][i % len(self.indices_ds[ds_idx][2])]
-
-        file_path = self.file_paths[ds_idx]
-
-        # Load file if not cached (cache per worker process)
-        if file_path != self._cached_file_path:
-            self._cached_file_data = self._load_and_normalize(file_path)
-            self._cached_file_path = file_path
-
-        # Extract patch from cached data
-        t_range = slice(t_idx, t_idx + self.patch_size[0])
-        y_range = slice(y_idx, y_idx + self.patch_size[1])
-        z_range = slice(z_idx, z_idx + self.patch_size[2])
-
-        noisy_image = self._cached_file_data[t_range, y_range, z_range]
-
-        return (
-            noisy_image,
-            torch.tensor(
-                [
-                    [t_idx, t_idx + self.patch_size[0]],
-                    [y_idx, y_idx + self.patch_size[1]],
-                    [z_idx, z_idx + self.patch_size[2]],
-                ]
-            ),
-            torch.tensor(ds_idx),
-        )
-
-
 class DatasetSUPPORT(Dataset):
     def __init__(
         self,
@@ -713,6 +590,8 @@ class DatasetSUPPORT_test_stitch(Dataset):
         transform=None,
         random_patch=False,
         random_patch_seed=0,
+        phase_sin=None,
+        phase_cos=None,
     ):
         """
         Arguments:
@@ -737,6 +616,8 @@ class DatasetSUPPORT_test_stitch(Dataset):
         self.patch_rng = np.random.default_rng(random_patch_seed)
         self.noisy_image = noisy_image
         self.noisy_image, self.mean_image, self.std_image = normalize(self.noisy_image)
+        self.phase_sin = phase_sin
+        self.phase_cos = phase_cos
 
         # generate index
         self.indices = []
@@ -769,6 +650,16 @@ class DatasetSUPPORT_test_stitch(Dataset):
 
         # for stitching dataset range
         noisy_image = self.noisy_image[init_s:end_s, init_h:end_h, init_w:end_w]
+        phase_sin = (
+            self.phase_sin[init_s:end_s, init_h:end_h]
+            if self.phase_sin is not None
+            else torch.empty(1)
+        )
+        phase_cos = (
+            self.phase_cos[init_s:end_s, init_h:end_h]
+            if self.phase_cos is not None
+            else torch.empty(1)
+        )
 
         # transform
         if self.transform:
@@ -776,7 +667,7 @@ class DatasetSUPPORT_test_stitch(Dataset):
             rand_t = self.patch_rng.integers(0, 2)
             noisy_image = self.transform.mask(noisy_image, rand_i, rand_t)
 
-        return noisy_image, torch.empty(1), single_coordinate
+        return noisy_image, torch.empty(1), single_coordinate, phase_sin, phase_cos
 
 
 def gen_train_dataloader(
@@ -803,79 +694,40 @@ def gen_train_dataloader(
     Returns:
         dataloader_train
     """
-    # Check if lazy loading is enabled (only for .tif files, not zarr)
-    use_lazy_loading = hasattr(opt, "lazy_loading") and opt.lazy_loading and not is_zarr
+    noisy_images_train = []
+    phase_sin_list = [] if use_phase_conditioning else None
+    phase_cos_list = [] if use_phase_conditioning else None
 
-    if use_lazy_loading:
-        print("=" * 70)
-        print("LAZY LOADING MODE ENABLED")
-        print("=" * 70)
-        print(f"Files will be streamed from disk instead of loaded into RAM")
-        print(
-            f"This allows training with many more files (current: {len(noisy_data_list)} files)"
-        )
-        print("=" * 70)
-
-        # Compute or load normalization statistics from cache
-        # Only rank 0 computes, others wait and load
-        mean_std_dict = _load_or_compute_normalization_stats(
-            noisy_data_list, is_raw, opt, results_dir=opt.results_dir, rank=rank
-        )
-
-        # Create lazy-loading dataset
-        dataset_train = DatasetSUPPORT_Lazy(
-            file_paths=noisy_data_list,
-            mean_std_dict=mean_std_dict,
-            patch_size=patch_size,
-            patch_interval=patch_interval,
-            is_raw=is_raw,
-            opt=opt,
-            transform=None,
-            random_patch=True,
-        )
-
-        print("=" * 70)
-        print(f"✓ Lazy loading dataset created with {len(noisy_data_list)} files")
-        print(f"  Memory usage: Minimal (~2-3 GB per node)")
-        print(f"  Dataset size: {len(dataset_train):,} patches")
-        print("=" * 70)
-
-    else:
-        # Original eager-loading behavior
-        noisy_images_train = []
-        phase_sin_list = [] if use_phase_conditioning else None
-        phase_cos_list = [] if use_phase_conditioning else None
-
-        for noisy_data in noisy_data_list:
-            if not is_zarr:
-                # Use the helper function to load file
-                noisy_image = _load_tif_file(noisy_data, is_raw, opt)
-                print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")
-                noisy_images_train.append(noisy_image)
+    for noisy_data in noisy_data_list:
+        if not is_zarr:
+            # Use the helper function to load file
+            noisy_image = _load_tif_file(noisy_data, is_raw, opt)
+            print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")
+            noisy_images_train.append(noisy_image)
+        else:
+            zarr_data = zarr.open(noisy_data, mode="r")
+            if is_raw:
+                noisy_image = zarr_data["eod"]
+                if use_phase_conditioning:
+                    position_signal = zarr_data["position"][:]
+                    phase_sin, phase_cos = extract_phase(position_signal)
+                    phase_sin_list.append(phase_sin)
+                    phase_cos_list.append(phase_cos)
             else:
-                zarr_data = zarr.open(noisy_data, mode="r")
-                if is_raw:
-                    noisy_image = zarr_data["eod"]
-                    if use_phase_conditioning:
-                        position_signal = zarr_data["position"][:]
-                        phase_sin, phase_cos = extract_phase(position_signal)
-                        phase_sin_list.append(phase_sin)
-                        phase_cos_list.append(phase_cos)
-                else:
-                    noisy_image = zarr_data["reconstructed"]
-                print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")
-                noisy_images_train.append(noisy_image)
+                noisy_image = zarr_data["reconstructed"]
+            print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")
+            noisy_images_train.append(noisy_image)
 
-        dataset_train = DatasetSUPPORT(
-            noisy_images_train,
-            patch_size=patch_size,
-            patch_interval=patch_interval,
-            transform=None,
-            random_patch=True,
-            load_to_memory=not is_zarr,
-            phase_sin_list=phase_sin_list,
-            phase_cos_list=phase_cos_list,
-        )
+    dataset_train = DatasetSUPPORT(
+        noisy_images_train,
+        patch_size=patch_size,
+        patch_interval=patch_interval,
+        transform=None,
+        random_patch=True,
+        load_to_memory=not is_zarr,
+        phase_sin_list=phase_sin_list,
+        phase_cos_list=phase_cos_list,
+    )
 
     # Create DataLoader (same for both lazy and eager loading)
     dataloader_train = DataLoader(
