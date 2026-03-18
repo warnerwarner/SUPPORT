@@ -711,6 +711,9 @@ def gen_train_dataloader(
                 if use_phase_conditioning:
                     position_signal = zarr_data["position"][:]
                     phase_sin, phase_cos = extract_phase(position_signal)
+                    if phase_sin.is_cuda:
+                        phase_sin = phase_sin.cpu()
+                        phase_cos = phase_cos.cpu()
                     phase_sin_list.append(phase_sin)
                     phase_cos_list.append(phase_cos)
             else:
@@ -725,8 +728,8 @@ def gen_train_dataloader(
         transform=None,
         random_patch=True,
         load_to_memory=not is_zarr,
-        phase_sin_list=phase_sin_list,
-        phase_cos_list=phase_cos_list,
+        phase_sin_list=phase_sin_list if use_phase_conditioning else None,
+        phase_cos_list=phase_cos_list if use_phase_conditioning else None,
     )
 
     # Create DataLoader (same for both lazy and eager loading)

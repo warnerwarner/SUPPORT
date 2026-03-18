@@ -65,9 +65,9 @@ class SUPPORT(nn.Module):
         else:
             self.twod = False
 
-        assert not (self.bp and self.twod), (
-            "two options cannot be selected in same time."
-        )
+        assert not (
+            self.bp and self.twod
+        ), "two options cannot be selected in same time."
 
         # initialize
         self.relu = nn.ReLU()
@@ -175,6 +175,23 @@ class SUPPORT(nn.Module):
             self.scalars_5x5.append(nn.Parameter(torch.ones(c_in), requires_grad=True))
         self.scalars_5x5 = nn.ParameterList(self.scalars_5x5)
 
+        # Per-layer 1x1 convs to project phase-augmented input (3 ch) into
+        # blind_conv_channels for re-injection at layers c >= 1.
+        # Only created when phase conditioning is active.
+        if self.use_phase_conditioning:
+            self.inject_proj_3x3 = nn.ModuleList(
+                [
+                    nn.Conv2d(3, self.blind_conv_channels, kernel_size=1)
+                    for _ in range(self.depth3x3 - 1)
+                ]
+            )
+            self.inject_proj_5x5 = nn.ModuleList(
+                [
+                    nn.Conv2d(3, self.blind_conv_channels, kernel_size=1)
+                    for _ in range(self.depth5x5 - 1)
+                ]
+            )
+
         # (BS) first layer to process Unet output
         conv3x3 = []
         # Calculate input channels: UNet output + 2 (sin/cos of center-frame row phase)
@@ -216,7 +233,10 @@ class SUPPORT(nn.Module):
         # (BS) dilated convolutions with blind-spot
         blind_conv3x3_layers = []
         for d in range(self.depth3x3):
-            c_in = 1 if d == 0 else self.blind_conv_channels
+            if d == 0:
+                c_in = 3 if self.use_phase_conditioning else 1
+            else:
+                c_in = self.blind_conv_channels
 
             # NOTE: Always use isotropic dilations regardless of is_raw flag
             # The is_raw flag is used for data loading/alignment only
@@ -244,7 +264,10 @@ class SUPPORT(nn.Module):
 
         blind_conv5x5_layers = []
         for d in range(self.depth5x5):
-            c_in = 1 if d == 0 else self.blind_conv_channels
+            if d == 0:
+                c_in = 3 if self.use_phase_conditioning else 1
+            else:
+                c_in = self.blind_conv_channels
 
             # NOTE: Always use isotropic dilations regardless of is_raw flag
             # The is_raw flag is used for data loading/alignment only
@@ -302,6 +325,7 @@ class SUPPORT(nn.Module):
         # print(x.size(), x.min(), x.max(), 'unet')
 
         for idx, enc_layer in enumerate(self.enc_layers):
+
             x = self.relu(enc_layer(x))
             if idx != len(self.enc_layers) - 1:
                 xs.append(x)
@@ -321,35 +345,51 @@ class SUPPORT(nn.Module):
         return x
 
     def forward_bsnet(self, x, unet_out, phase_sin=None, phase_cos=None):
-        # x : bsnet input
+        # x : bsnet input (B, 1, H, W) — raw center frame
         # unet_out : unet output
 
         hc = []
 
+        # Build phase-augmented input for injection at every BS-net layer
+        # When phase conditioning is active, x_inject = (B, 3, H, W): center frame + sin + cos
+        # Otherwise, x_inject = x = (B, 1, H, W)
+        if self.use_phase_conditioning and phase_sin is not None:
+            B, C, H, W = x.shape
+            p_sin = phase_sin.unsqueeze(1).unsqueeze(-1).expand(B, 1, H, W)
+            p_cos = phase_cos.unsqueeze(1).unsqueeze(-1).expand(B, 1, H, W)
+            x_inject = torch.cat([x, p_sin, p_cos], dim=1)  # (B, 3, H, W)
+        else:
+            x_inject = x  # (B, 1, H, W)
+
         if unet_out is not None:
-            # Concatenate phase info if enabled
+            # Concatenate phase info to U-Net output if enabled
             if self.use_phase_conditioning and phase_sin is not None:
                 # phase_sin, phase_cos: (B, H) — one phase per row for the center frame
                 # Reshape to (B, 1, H, 1) and broadcast to (B, 1, H, W)
-                B, C, H, W = unet_out.shape
-                p_sin = phase_sin.unsqueeze(1).unsqueeze(-1).expand(B, 1, H, W)
-                p_cos = phase_cos.unsqueeze(1).unsqueeze(-1).expand(B, 1, H, W)
+                B_u, C_u, H_u, W_u = unet_out.shape
+                up_sin = phase_sin.unsqueeze(1).unsqueeze(-1).expand(B_u, 1, H_u, W_u)
+                up_cos = phase_cos.unsqueeze(1).unsqueeze(-1).expand(B_u, 1, H_u, W_u)
                 # Concatenate along the channel dimension: adds 2 channels
-                unet_out = torch.cat([unet_out, p_sin, p_cos], dim=1)
+                unet_out = torch.cat([unet_out, up_sin, up_cos], dim=1)
 
             unet_out1 = self.conv3x3[0](unet_out)
             unet_out1 = self.conv3x3[1](unet_out1)
 
         for c in range(self.depth3x3):
             if c == 0:
-                x1 = x
+                x1 = x_inject
             else:
                 # x1 = x1 + x1.max() * inp
                 # print(x.size())
                 if not self.prevent_injection:
-                    x1 = x1 + (self.scalars_3x3[c - 1] * x.permute(0, 2, 3, 1)).permute(
-                        0, 3, 1, 2
-                    )
+                    if self.use_phase_conditioning and phase_sin is not None:
+                        # Phase mode: use learned 1x1 conv projection
+                        x1 = x1 + self.inject_proj_3x3[c - 1](x_inject)
+                    else:
+                        # Non-phase mode: use original scalar injection with x (1 channel)
+                        x1 = x1 + (
+                            self.scalars_3x3[c - 1] * x.permute(0, 2, 3, 1)
+                        ).permute(0, 3, 1, 2)
                 else:
                     x1 = x1
 
@@ -371,12 +411,17 @@ class SUPPORT(nn.Module):
 
         for c in range(self.depth5x5):
             if c == 0:
-                x2 = x
+                x2 = x_inject
             else:
                 if not self.prevent_injection:
-                    x2 = x2 + (self.scalars_5x5[c - 1] * x.permute(0, 2, 3, 1)).permute(
-                        0, 3, 1, 2
-                    )
+                    if self.use_phase_conditioning and phase_sin is not None:
+                        # Phase mode: use learned 1x1 conv projection
+                        x2 = x2 + self.inject_proj_5x5[c - 1](x_inject)
+                    else:
+                        # Non-phase mode: use original scalar injection with x (1 channel)
+                        x2 = x2 + (
+                            self.scalars_5x5[c - 1] * x.permute(0, 2, 3, 1)
+                        ).permute(0, 3, 1, 2)
                 else:
                     x2 = x2
 

@@ -371,7 +371,7 @@ if __name__ == "__main__":
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=opt.prevent_injection,
+            find_unused_parameters=opt.prevent_injection or opt.use_phase_conditioning,
         )
         if rank == 0:
             print(f"Model wrapped with DistributedDataParallel")
