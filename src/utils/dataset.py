@@ -11,7 +11,8 @@ from scipy.signal import hilbert
 from tqdm import tqdm, trange
 from torch.utils.data import Dataset, DataLoader
 from src.utils.util import get_coordinate
-from src.utils.alignment import align_data
+from src.utils.alignment import align_data, calculate_peak_shifts
+from src.utils.alignedzarr import AlignedZarr
 
 try:
     import torch
@@ -212,6 +213,7 @@ def _load_tif_file(file_path, is_raw, opt):
         frames = np.transpose(frames, (0, 1, 2, 3))
         if opt.align_data:
             frames = align_data(frames, opt.alignment_method, **opt.alignment_kwargs)
+            print("Alignment applied to raw data using method:", opt.alignment_method)
         frames = frames[:, 0]
     else:
         if opt.align_data:
@@ -369,6 +371,8 @@ class DatasetSUPPORT(Dataset):
         random_patch_seed=0,
         phase_sin_list=None,
         phase_cos_list=None,
+        align_data=False,
+        alignment_method="peaks",
     ):
         """
         Arguments:
@@ -404,6 +408,9 @@ class DatasetSUPPORT(Dataset):
         self.load_to_memory = load_to_memory
         self.phase_sin_list = phase_sin_list
         self.phase_cos_list = phase_cos_list
+        self.align_data = align_data
+        self.alignment_method = alignment_method
+        self.alignment_shifts = []
 
         self.noisy_images = noisy_images
         self.mean_images = []
@@ -535,6 +542,7 @@ class DatasetSUPPORT(Dataset):
             noisy_image_avg = torch.tensor(self.noisy_images[ds_idx].attrs["mean"])
             noisy_image_std = torch.tensor(self.noisy_images[ds_idx].attrs["std"])
             noisy_image = self.noisy_images[ds_idx][t_range, y_range, z_range]
+
             noisy_image = torch.tensor(noisy_image, dtype=torch.float32)
             if self.phase_sin_list is not None:
                 return (
@@ -552,6 +560,7 @@ class DatasetSUPPORT(Dataset):
                     phase_sin,
                     phase_cos,
                 )
+
             else:
                 return (
                     noisy_image,
@@ -698,7 +707,7 @@ def gen_train_dataloader(
     phase_sin_list = [] if use_phase_conditioning else None
     phase_cos_list = [] if use_phase_conditioning else None
 
-    for noisy_data in noisy_data_list:
+    for idx, noisy_data in enumerate(noisy_data_list):
         if not is_zarr:
             # Use the helper function to load file
             noisy_image = _load_tif_file(noisy_data, is_raw, opt)
@@ -707,15 +716,24 @@ def gen_train_dataloader(
         else:
             zarr_data = zarr.open(noisy_data, mode="r")
             if is_raw:
-                noisy_image = zarr_data["eod"]
-                if use_phase_conditioning:
+                if opt.align_data or use_phase_conditioning:
+                    noisy_image = zarr_data["eod"]
                     position_signal = zarr_data["position"][:]
+
+                if use_phase_conditioning:
+                    noisy_image = zarr_data["eod"]
                     phase_sin, phase_cos = extract_phase(position_signal)
                     if phase_sin.is_cuda:
                         phase_sin = phase_sin.cpu()
                         phase_cos = phase_cos.cpu()
                     phase_sin_list.append(phase_sin)
                     phase_cos_list.append(phase_cos)
+                if opt.align_data:
+                    # Pre-calculate shifts in the main process to avoid fork-safety issues
+                    with zarr.open(noisy_data, mode="r") as store:
+                        pos_data = store["position"][:]
+                        shifts = calculate_peak_shifts(pos_data)
+                    noisy_image = AlignedZarr(noisy_data, shifts=shifts)
             else:
                 noisy_image = zarr_data["reconstructed"]
             print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")

@@ -71,7 +71,7 @@ class SUPPORT(nn.Module):
 
         # initialize
         self.relu = nn.ReLU()
-        self.leaky_relu = nn.LeakyReLU()
+        self.leaky_relu = nn.LeakyReLU(0.1)
         self.maxpool_2d = nn.MaxPool2d(kernel_size=2, stride=2)
         self.upsample_2d = nn.Upsample(scale_factor=2)
 
@@ -211,7 +211,7 @@ class SUPPORT(nn.Module):
                 dilation=1,
             )
         )
-        conv3x3.append(self.relu)
+        conv3x3.append(self.leaky_relu)
         self.conv3x3 = nn.ModuleList(conv3x3)
 
         conv5x5 = []
@@ -227,7 +227,7 @@ class SUPPORT(nn.Module):
                 dilation=1,
             )
         )
-        conv5x5.append(self.relu)
+        conv5x5.append(self.leaky_relu)
         self.conv5x5 = nn.ModuleList(conv5x5)
 
         # (BS) dilated convolutions with blind-spot
@@ -259,7 +259,7 @@ class SUPPORT(nn.Module):
                     dilation=pd,
                 )
             )
-            blind_conv3x3_layers.append(self.relu)
+            blind_conv3x3_layers.append(self.leaky_relu)
         self.blind_convs3x3 = nn.ModuleList(blind_conv3x3_layers)
 
         blind_conv5x5_layers = []
@@ -288,7 +288,7 @@ class SUPPORT(nn.Module):
                     dilation=pd,
                 )
             )
-            blind_conv5x5_layers.append(self.relu)
+            blind_conv5x5_layers.append(self.leaky_relu)
         self.blind_convs5x5 = nn.ModuleList(blind_conv5x5_layers)
 
         # (BS) 1x1 convolutions
@@ -315,7 +315,7 @@ class SUPPORT(nn.Module):
                     bias=True,
                 )
             )
-            out_convs.append(self.relu)
+            out_convs.append(self.leaky_relu)
         self.out_convs = nn.ModuleList(out_convs)
 
     def forward_unet(self, x):
@@ -325,7 +325,6 @@ class SUPPORT(nn.Module):
         # print(x.size(), x.min(), x.max(), 'unet')
 
         for idx, enc_layer in enumerate(self.enc_layers):
-
             x = self.relu(enc_layer(x))
             if idx != len(self.enc_layers) - 1:
                 xs.append(x)
@@ -337,10 +336,10 @@ class SUPPORT(nn.Module):
             up_ = torch.nn.functional.interpolate(x, xs[-idx - 1].size()[2:])
 
             x = torch.cat([up_, xs[-idx - 1]], dim=1)
-            x = self.relu(dec_layer(x))
+            x = self.leaky_relu(dec_layer(x))
 
         for one_conv in self.unet_1_convs:
-            x = self.relu(one_conv(x))
+            x = self.leaky_relu(one_conv(x))
 
         return x
 
@@ -500,7 +499,7 @@ class SUPPORT(nn.Module):
 
         for idx, layer in enumerate(self.last_layers):
             if idx != len(self.last_layers) - 1:
-                x = self.relu(layer(x))
+                x = self.leaky_relu(layer(x))
             else:
                 x = layer(x)
 

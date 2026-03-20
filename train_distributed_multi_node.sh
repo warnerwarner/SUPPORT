@@ -36,6 +36,10 @@ n_epochs=20
 exp_name="stephenvoltage_if_61_bs_2_2_l107l203"
 checkpoint_interval=5  # Match original training (save every 5 epochs)
 
+# Optional: Uncomment to enable phase conditioning
+# PHASE_FLAG="--use_phase_conditioning"
+PHASE_FLAG=${PHASE_FLAG:-""}
+
 # Change to project directory
 cd /gpfs/data/shohamlab/tom/support
 
@@ -59,7 +63,12 @@ srun /gpfs/data/shohamlab/tom/voltage_imaging/.pixi/envs/default/bin/python \
     --training_size 20 \
     --use_amp \
     --n_cpu 7 \
-    --loss_coef 0.7 0.3
+    --loss_coef 0.7 0.3 \
+    --blind_conv_channels 96 \
+    --unet_channels 96 192 384 768 1536 \
+    --one_by_one_channels 48 24 \
+    --last_layer_channels 96 48 24 \
+    $PHASE_FLAG
 
 echo ""
 echo "=========================================="

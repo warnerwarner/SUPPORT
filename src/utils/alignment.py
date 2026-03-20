@@ -132,6 +132,39 @@ def _align_data_peaks(
     return aligned_data
 
 
+def calculate_peak_shifts(
+    data: np.ndarray, height: int = 1000
+) -> np.ndarray[np.int32, 2]:
+    """Calculate peak shifts for each line in the dataset
+
+    Parameters
+    ----------
+    data : np.ndarray
+        input data, of shape frames x 2 x lines x time
+    height : int
+        the minimum height of peaks to consider, defaults to 1000
+
+    Returns
+    -------
+    ndarray[np.int32, 2]
+        An array of shape (frames, lines) containing the shift (in samples)
+        for each line in each frame based on the first detected peak
+
+    """
+    if len(data.shape) > 3:
+        data = data[:, 1, :, :]
+    t, x, z = data.shape
+    shifts = np.zeros((t, x), dtype=np.int32)
+    print("Calculating peak shifts for each line in the dataset...")
+    for frame_idx in trange(t):
+        for row_idx in range(x):
+            line = data[frame_idx, row_idx, :100]
+            peaks, _ = find_peaks(line, height=height)
+            assert len(peaks) > 0, f"No peaks found in frame {frame_idx}, row {row_idx}"
+            shifts[frame_idx, row_idx] = peaks[0]
+    return shifts
+
+
 def align_data(
     data, method: str = "correlation", **kwargs
 ) -> np.ndarray[np.float32, 4]:
