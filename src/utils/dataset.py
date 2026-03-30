@@ -714,28 +714,24 @@ def gen_train_dataloader(
             print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")
             noisy_images_train.append(noisy_image)
         else:
-            zarr_data = zarr.open(noisy_data, mode="r")
-            if is_raw:
-                if opt.align_data or use_phase_conditioning:
-                    noisy_image = zarr_data["eod"]
-                    position_signal = zarr_data["position"][:]
+            with zarr.open(noisy_data, mode="r") as store:
+                if is_raw:
+                    noisy_image = store["eod"]
 
-                if use_phase_conditioning:
-                    noisy_image = zarr_data["eod"]
-                    phase_sin, phase_cos = extract_phase(position_signal)
-                    if phase_sin.is_cuda:
-                        phase_sin = phase_sin.cpu()
-                        phase_cos = phase_cos.cpu()
-                    phase_sin_list.append(phase_sin)
-                    phase_cos_list.append(phase_cos)
-                if opt.align_data:
-                    # Pre-calculate shifts in the main process to avoid fork-safety issues
-                    with zarr.open(noisy_data, mode="r") as store:
-                        pos_data = store["position"][:]
-                        shifts = calculate_peak_shifts(pos_data)
-                    noisy_image = AlignedZarr(noisy_data, shifts=shifts)
-            else:
-                noisy_image = zarr_data["reconstructed"]
+                    if use_phase_conditioning:
+                        position_signal = store["position"][:]
+                        phase_sin, phase_cos = extract_phase(position_signal)
+                        if phase_sin.is_cuda:
+                            phase_sin = phase_sin.cpu()
+                            phase_cos = phase_cos.cpu()
+                        phase_sin_list.append(phase_sin)
+                        phase_cos_list.append(phase_cos)
+                    if opt.align_data:
+                        position_signal = store["position"][:]
+                        shifts = calculate_peak_shifts(position_signal)
+                        noisy_image = AlignedZarr(noisy_data, shifts=shifts)
+                else:
+                    noisy_image = store["reconstructed"]
             print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")
             noisy_images_train.append(noisy_image)
 

@@ -82,22 +82,30 @@ class SUPPORT(nn.Module):
 
         # last layer
         last_layers = []
-        for idx, c in enumerate(last_layer_channels):
+        for idx, c in enumerate(self.last_layer_channels):
             if idx == 0:
                 if bp is False and self.twod is False:
                     last_layers.append(
                         nn.Conv2d(
-                            2 * one_by_one_channels[-1], c, kernel_size=1, padding=0
+                            2 * self.one_by_one_channels[-1],
+                            c,
+                            kernel_size=1,
+                            padding=0,
                         )
                     )
                 else:
                     last_layers.append(
-                        nn.Conv2d(one_by_one_channels[-1], c, kernel_size=1, padding=0)
+                        nn.Conv2d(
+                            self.one_by_one_channels[-1], c, kernel_size=1, padding=0
+                        )
                     )
             else:
                 last_layers.append(
                     nn.Conv2d(last_layer_channels[idx - 1], c, kernel_size=1, padding=0)
                 )
+            last_layers.append(nn.BatchNorm2d(c))
+            last_layers.append(self.leaky_relu)
+
         last_layers.append(nn.Conv2d(c, self.out_channels, kernel_size=1, padding=0))
 
         self.last_layers = nn.ModuleList(last_layers)
@@ -111,6 +119,7 @@ class SUPPORT(nn.Module):
             unet_in_channels = 3 * (self.in_channels - 1)
 
         self.enc_layers = []
+        self.enc_bn_layers = []
         for i in range(len(self.mid_channels)):
             if i == 0:
                 self.enc_layers.append(
@@ -130,10 +139,14 @@ class SUPPORT(nn.Module):
                         padding=1,
                     )
                 )
+            self.enc_bn_layers.append(nn.BatchNorm2d(self.mid_channels[i]))
         self.enc_layers = nn.ModuleList(self.enc_layers)
+        self.enc_bn_layers = nn.ModuleList(self.enc_bn_layers)
+        self.enc_bn_layers = nn.ModuleList(self.enc_bn_layers)
 
         # (Unet) decoding layers
         self.dec_layers = []
+        self.dec_bn_layers = []
         for i in range(len(self.mid_channels) - 1):
             self.dec_layers.append(
                 nn.Conv2d(
@@ -143,10 +156,13 @@ class SUPPORT(nn.Module):
                     padding=1,
                 )
             )
+            self.dec_bn_layers.append(nn.BatchNorm2d(self.mid_channels[i]))
         self.dec_layers = nn.ModuleList(reversed(self.dec_layers))
+        self.dec_bn_layers = nn.ModuleList(reversed(self.dec_bn_layers))
 
         # (Unet) 1x1 convs
         self.unet_1_convs = []
+        self.unet_1_convs_bn = []
         for idx, c in enumerate(self.one_by_one_channels):
             if idx == 0:
                 self.unet_1_convs.append(
@@ -158,7 +174,9 @@ class SUPPORT(nn.Module):
                         self.one_by_one_channels[idx - 1], c, kernel_size=1, padding=0
                     )
                 )
+            self.unet_1_convs_bn.append(nn.BatchNorm2d(c))
         self.unet_1_convs = nn.ModuleList(self.unet_1_convs)
+        self.unet_1_convs_bn = nn.ModuleList(self.unet_1_convs_bn)
 
     def _gen_bsnet(self):
         # (BS) additional parameters
@@ -211,6 +229,7 @@ class SUPPORT(nn.Module):
                 dilation=1,
             )
         )
+        conv3x3.append(nn.BatchNorm2d(self.blind_conv_channels))
         conv3x3.append(self.leaky_relu)
         self.conv3x3 = nn.ModuleList(conv3x3)
 
@@ -227,6 +246,7 @@ class SUPPORT(nn.Module):
                 dilation=1,
             )
         )
+        conv5x5.append(nn.BatchNorm2d(self.blind_conv_channels))
         conv5x5.append(self.leaky_relu)
         self.conv5x5 = nn.ModuleList(conv5x5)
 
@@ -259,6 +279,7 @@ class SUPPORT(nn.Module):
                     dilation=pd,
                 )
             )
+            blind_conv3x3_layers.append(nn.BatchNorm2d(self.blind_conv_channels))
             blind_conv3x3_layers.append(self.leaky_relu)
         self.blind_convs3x3 = nn.ModuleList(blind_conv3x3_layers)
 
@@ -288,6 +309,7 @@ class SUPPORT(nn.Module):
                     dilation=pd,
                 )
             )
+            blind_conv5x5_layers.append(nn.BatchNorm2d(self.blind_conv_channels))
             blind_conv5x5_layers.append(self.leaky_relu)
         self.blind_convs5x5 = nn.ModuleList(blind_conv5x5_layers)
 
@@ -315,6 +337,7 @@ class SUPPORT(nn.Module):
                     bias=True,
                 )
             )
+            out_convs.append(nn.BatchNorm2d(c))
             out_convs.append(self.leaky_relu)
         self.out_convs = nn.ModuleList(out_convs)
 
@@ -325,7 +348,7 @@ class SUPPORT(nn.Module):
         # print(x.size(), x.min(), x.max(), 'unet')
 
         for idx, enc_layer in enumerate(self.enc_layers):
-            x = self.relu(enc_layer(x))
+            x = self.leaky_relu(self.enc_bn_layers[idx](enc_layer(x)))
             if idx != len(self.enc_layers) - 1:
                 xs.append(x)
                 x = self.maxpool_2d(x)
@@ -336,10 +359,10 @@ class SUPPORT(nn.Module):
             up_ = torch.nn.functional.interpolate(x, xs[-idx - 1].size()[2:])
 
             x = torch.cat([up_, xs[-idx - 1]], dim=1)
-            x = self.leaky_relu(dec_layer(x))
+            x = self.leaky_relu(self.dec_bn_layers[idx](dec_layer(x)))
 
-        for one_conv in self.unet_1_convs:
-            x = self.leaky_relu(one_conv(x))
+        for idx, one_conv in enumerate(self.unet_1_convs):
+            x = self.leaky_relu(self.unet_1_convs_bn[idx](one_conv(x)))
 
         return x
 
@@ -373,6 +396,7 @@ class SUPPORT(nn.Module):
 
             unet_out1 = self.conv3x3[0](unet_out)
             unet_out1 = self.conv3x3[1](unet_out1)
+            unet_out1 = self.conv3x3[2](unet_out1)
 
         for c in range(self.depth3x3):
             if c == 0:
@@ -392,8 +416,9 @@ class SUPPORT(nn.Module):
                 else:
                     x1 = x1
 
-            x1 = self.blind_convs3x3[2 * c](x1)
-            x1 = self.blind_convs3x3[2 * c + 1](x1)
+            x1 = self.blind_convs3x3[3 * c](x1)
+            x1 = self.blind_convs3x3[3 * c + 1](x1)
+            x1 = self.blind_convs3x3[3 * c + 2](x1)
 
             if c == 0 and unet_out is not None:
                 x1 = x1 + unet_out1
@@ -407,6 +432,7 @@ class SUPPORT(nn.Module):
         if unet_out is not None:
             unet_out2 = self.conv5x5[0](unet_out)
             unet_out2 = self.conv5x5[1](unet_out2)
+            unet_out2 = self.conv5x5[2](unet_out2)
 
         for c in range(self.depth5x5):
             if c == 0:
@@ -424,8 +450,9 @@ class SUPPORT(nn.Module):
                 else:
                     x2 = x2
 
-            x2 = self.blind_convs5x5[2 * c](x2)
-            x2 = self.blind_convs5x5[2 * c + 1](x2)
+            x2 = self.blind_convs5x5[3 * c](x2)
+            x2 = self.blind_convs5x5[3 * c + 1](x2)
+            x2 = self.blind_convs5x5[3 * c + 2](x2)
 
             if c == 0 and unet_out is not None:
                 x2 = x2 + unet_out2
@@ -438,8 +465,10 @@ class SUPPORT(nn.Module):
 
         x = torch.cat(hc, dim=1)
 
-        for o_m in self.out_convs:
-            x = o_m(x)
+        for i in range(len(self.out_convs) // 3):
+            x = self.out_convs[3 * i + 2](
+                self.out_convs[3 * i + 1](self.out_convs[3 * i](x))
+            )
 
         return x
 
@@ -497,12 +526,11 @@ class SUPPORT(nn.Module):
 
             x = torch.cat([unet_out, bsnet_out], dim=1)
 
-        for idx, layer in enumerate(self.last_layers):
-            if idx != len(self.last_layers) - 1:
-                x = self.leaky_relu(layer(x))
-            else:
-                x = layer(x)
-
+        for i in range(len(self.last_layers) // 3):
+            x = self.last_layers[3 * i + 2](
+                self.last_layers[3 * i + 1](self.last_layers[3 * i](x))
+            )
+        x = self.last_layers[-1](x)
         return x
 
 
