@@ -9,14 +9,16 @@ from src.utils.dataset import DatasetSUPPORT_test_stitch
 from model.SUPPORT import SUPPORT
 
 
-def validate(test_dataloader, model):
+def validate(test_dataloader, model, use_phase_conditioning=False):
     """
     Validate a model with a test data
 
     Arguments:
         test_dataloader: (Pytorch DataLoader)
-            Should be DatasetFRECTAL_test_stitch!
+            Should be DatasetSUPPORT_test_stitch!
+            Always returns 5 items: (noisy_image, _, single_coordinate, phase_sin, phase_cos)
         model: (Pytorch nn.Module)
+        use_phase_conditioning: (bool) DEPRECATED - not used anymore, kept for compatibility
 
     Returns:
         denoised_stack: denoised image stack (Numpy array with dimension [T, X, Y])
@@ -31,11 +33,24 @@ def validate(test_dataloader, model):
         # stitching denoised stack
         # insert the results if the stack value was NaN
         # or, half of the output volume
-        for _, (noisy_image, _, single_coordinate) in enumerate(
+        for _, batch_data in enumerate(
             tqdm(test_dataloader, desc="validate")
         ):
+            # Always unpack 5 items - phase_sin and phase_cos are always returned
+            # but may be empty tensors if not provided
+            noisy_image, _, single_coordinate, phase_sin, phase_cos = batch_data
+
             noisy_image = noisy_image.cuda()  # [b, z, y, x]
-            noisy_image_denoised = model(noisy_image)
+            phase_sin = phase_sin.cuda() if phase_sin is not None else None
+            phase_cos = phase_cos.cuda() if phase_cos is not None else None
+
+            # Check if phase data is actually present (not empty tensors)
+            # Empty tensors have size 1 and were used as placeholders
+            if phase_sin is not None and phase_sin.numel() > 1:
+                noisy_image_denoised = model(noisy_image, phase_sin, phase_cos).cpu()
+            else:
+                noisy_image_denoised = model(noisy_image)
+
             T = noisy_image.size(1)
             for bi in range(noisy_image.size(0)):
                 stack_start_w = int(single_coordinate["stack_start_w"][bi])

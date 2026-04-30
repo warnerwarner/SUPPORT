@@ -11,6 +11,8 @@ class SUPPORT(nn.Module):
     Arguments:
         in_channels: the number of input channels (int)
         mid_channels: the number of middle channels ([int])
+        use_splatting: whether to use learnable splatting stage (bool)
+        splatting_config: configuration dict for splatting stage (dict or None)
     """
 
     def __init__(
@@ -26,6 +28,10 @@ class SUPPORT(nn.Module):
         is_raw=False,
         prevent_injection=False,
         use_phase_conditioning=False,
+        use_splatting=False,
+        splatting_config=None,
+        use_point_offset=False,
+        point_offset_config=None,
     ):
         super(SUPPORT, self).__init__()
 
@@ -59,15 +65,43 @@ class SUPPORT(nn.Module):
         self.bp = bp
         self.is_raw = is_raw
         self.use_phase_conditioning = use_phase_conditioning
+        self.use_splatting = use_splatting
+        self.use_point_offset = use_point_offset
+
+        # Initialize splatting stage if enabled
+        if use_splatting:
+            if splatting_config is None:
+                raise ValueError(
+                    "splatting_config must be provided when use_splatting=True"
+                )
+            from model.splatting_stage import LearnableSplattingStage
+
+            self.splatting_stage = LearnableSplattingStage(**splatting_config)
+        else:
+            self.splatting_stage = None
+
+        # Optional point-offset stage before splatting
+        if use_point_offset:
+            from model.point_offset_stage import PointOffsetStage
+
+            if point_offset_config is None:
+                point_offset_config = {}
+            self.point_offset_stage = PointOffsetStage(**point_offset_config)
+            # Initial strategy: keep splatting parameters frozen while learning offsets
+            if self.splatting_stage is not None:
+                for p in self.splatting_stage.parameters():
+                    p.requires_grad = False
+        else:
+            self.point_offset_stage = None
 
         if in_channels == 1:
             self.twod = True
         else:
             self.twod = False
 
-        assert not (
-            self.bp and self.twod
-        ), "two options cannot be selected in same time."
+        assert not (self.bp and self.twod), (
+            "two options cannot be selected in same time."
+        )
 
         # initialize
         self.relu = nn.ReLU()
@@ -472,9 +506,45 @@ class SUPPORT(nn.Module):
 
         return x
 
-    def forward(self, x, phase_sin=None, phase_cos=None):
-        # x = [B, T, H, W]
-        # phase_sin, phase_cos = [B, T, H] (per-row phase for all frames in patch)
+    def forward(
+        self, x, phase_sin=None, phase_cos=None, patch_origin=None, full_n_samples=None
+    ):
+        # Handle splatting if enabled
+        # x can be:
+        #   - [B, T, H, W] if not using splatting (original behavior)
+        #   - [B, T, 2, H, W] if using splatting (new: dim 2 is [eod, position])
+
+        if self.use_splatting:
+            # x should be [B, T, 2, H, W]
+            if x.ndim == 4:
+                raise ValueError(
+                    "When use_splatting=True, input must be [B, T, 2, H, W], got [B, T, H, W]. "
+                    "Make sure to load raw data with both eod and position channels."
+                )
+            learned_offsets = None
+            if self.use_point_offset and self.point_offset_stage is not None:
+                value0, u0, v0 = self.splatting_stage.compute_base_coordinates(
+                    x,
+                    patch_origin=patch_origin,
+                    full_n_samples=full_n_samples,
+                )
+                learned_offsets = self.point_offset_stage(value0, u0, v0)
+            self._last_offsets = learned_offsets
+
+            # Apply splatting stage to get [B, T, H', W']
+            x = self.splatting_stage(
+                x,
+                patch_origin=patch_origin,
+                full_n_samples=full_n_samples,
+                learned_offsets=learned_offsets,
+            )
+            self._last_splatted = x  # Cache for loss computation
+            # phase_sin/phase_cos are not used with splatting (phase is in raw signal)
+            phase_sin = None
+            phase_cos = None
+
+        # Now x = [B, T, H, W] regardless of splatting
+        # phase_sin, phase_cos = [B, T, H] (per-row phase for all frames in patch) or None
 
         center = self.in_channels // 2
 

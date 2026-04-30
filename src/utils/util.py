@@ -7,7 +7,6 @@ from pathlib import Path
 
 
 def parse_arguments(args=None):
-
     parser = argparse.ArgumentParser()
     # experiment
     parser.add_argument(
@@ -218,6 +217,85 @@ def parse_arguments(args=None):
         action="store_true",
         help="Use phase conditioning in the model",
     )
+
+    # Splatting arguments
+    parser.add_argument(
+        "--use_splatting",
+        action="store_true",
+        help="Use learnable splatting stage before denoising",
+    )
+    parser.add_argument(
+        "--splatting_params_json",
+        type=str,
+        default=None,
+        help="Path to JSON file with initial splatting parameters",
+    )
+    parser.add_argument(
+        "--loss_weight_denoise",
+        type=float,
+        default=1.0,
+        help="Weight for main denoising loss",
+    )
+    parser.add_argument(
+        "--loss_weight_param_reg",
+        type=float,
+        default=0.5,
+        help="Weight for splatting parameter regularization (decays over time)",
+    )
+    parser.add_argument(
+        "--loss_weight_signal_pres",
+        type=float,
+        default=0.1,
+        help="Weight for signal preservation loss (mean/variance)",
+    )
+    parser.add_argument(
+        "--loss_weight_tv",
+        type=float,
+        default=0.05,
+        help="Weight for total variation (smoothness) loss",
+    )
+    parser.add_argument(
+        "--loss_weight_temporal",
+        type=float,
+        default=0.1,
+        help="Weight for temporal consistency loss",
+    )
+    parser.add_argument(
+        "--reg_decay_epochs",
+        type=float,
+        default=50.0,
+        help="Number of epochs over which parameter regularization decays",
+    )
+    parser.add_argument(
+        "--grad_clip_max",
+        type=float,
+        default=1.0,
+        help="Maximum gradient norm for clipping (stability)",
+    )
+    parser.add_argument(
+        "--use_point_offset",
+        action="store_true",
+        help="Enable learned (du,dv) offset stage before splatting",
+    )
+    parser.add_argument(
+        "--point_offset_hidden_channels",
+        type=int,
+        default=16,
+        help="Hidden channels in point-offset stage",
+    )
+    parser.add_argument(
+        "--point_offset_max_px",
+        type=float,
+        default=1.0,
+        help="Maximum absolute offset (pixels in splat space)",
+    )
+    parser.add_argument(
+        "--loss_weight_offset_reg",
+        type=float,
+        default=0.1,
+        help="Weight for offset magnitude regularization",
+    )
+
     if args is not None:
         opt = parser.parse_args(args=args)
     else:
@@ -231,7 +309,6 @@ def parse_arguments(args=None):
 
     if not opt.is_zarr:
         if opt.is_folder:
-
             all_files = []
 
             for i in opt.noisy_data:

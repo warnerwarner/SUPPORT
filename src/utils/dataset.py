@@ -431,17 +431,29 @@ class DatasetSUPPORT(Dataset):
         for noisy_image in self.noisy_images:
             indices = []
             tmp_size = noisy_image.shape
-            if np.any(tmp_size < np.array(self.patch_size)):
+
+            # Handle 4D data for splatting: [T, C, H, W]
+            # vs 3D data for normal: [T, H, W]
+            if len(tmp_size) == 4:
+                # Splatting mode: compare [T, H, W] against patch_size [T, H, W]
+                # (skip channel dimension)
+                size_to_check = (tmp_size[0], tmp_size[2], tmp_size[3])
+            else:
+                size_to_check = tmp_size
+
+            if np.any(np.array(size_to_check) < np.array(self.patch_size)):
                 raise Exception("patch size is larger than data size")
 
-            for k in range(3):
+            # Generate indices for T, H, W dimensions (skipping C if present)
+            dims_to_index = [0, 2, 3] if len(tmp_size) == 4 else [0, 1, 2]
+            for i, k in enumerate(dims_to_index):
                 z_range = list(
                     range(
-                        0, tmp_size[k] - self.patch_size[k] + 1, self.patch_interval[k]
+                        0, tmp_size[k] - self.patch_size[i] + 1, self.patch_interval[i]
                     )
                 )
-                if tmp_size[k] - self.patch_size[k] > z_range[-1]:
-                    z_range.append(tmp_size[k] - self.patch_size[k])
+                if tmp_size[k] - self.patch_size[i] > z_range[-1]:
+                    z_range.append(tmp_size[k] - self.patch_size[i])
                 indices.append(z_range)
             self.indices_ds.append(indices)
 
@@ -461,7 +473,7 @@ class DatasetSUPPORT(Dataset):
 
         # Iterate over each image in the dataset
         for ds_idx, noisy_image in enumerate(self.noisy_images):
-            # Get the shape of the image (T, H, W)
+            # Get the shape of the image
             shape = noisy_image.shape
 
             # Determine the number of patches available for this image.
@@ -472,10 +484,18 @@ class DatasetSUPPORT(Dataset):
                 len(indices_lists[0]) * len(indices_lists[1]) * len(indices_lists[2])
             )
 
-            # Calculate the valid range for each dimension
-            t_range = shape[0] - self.patch_size[0] + 1
-            y_range = shape[1] - self.patch_size[1] + 1
-            z_range = shape[2] - self.patch_size[2] + 1
+            # Handle 4D data for splatting: [T, C, H, W]
+            # vs 3D data for normal: [T, H, W]
+            if len(shape) == 4:
+                # Splatting mode: use T, H, W dimensions (skip C at index 1)
+                t_range = shape[0] - self.patch_size[0] + 1
+                y_range = shape[2] - self.patch_size[1] + 1
+                z_range = shape[3] - self.patch_size[2] + 1
+            else:
+                # Normal mode: use T, H, W dimensions directly
+                t_range = shape[0] - self.patch_size[0] + 1
+                y_range = shape[1] - self.patch_size[1] + 1
+                z_range = shape[2] - self.patch_size[2] + 1
 
             # Generate random indices in a vectorized way for the current image
             t_indices = self.patch_rng.integers(0, t_range, size=count_i)
@@ -527,7 +547,12 @@ class DatasetSUPPORT(Dataset):
         z_range = slice(z_idx, z_idx + self.patch_size[2])
 
         if self.load_to_memory:
-            noisy_image = self.noisy_images[ds_idx][t_range, y_range, z_range]
+            # Handle 4D (splatting) vs 3D (normal) data
+            if len(self.noisy_images[ds_idx].shape) == 4:
+                # Splatting: [T, C, H, W] -> slice as [t_range, :, y_range, z_range]
+                noisy_image = self.noisy_images[ds_idx][t_range, :, y_range, z_range]
+            else:
+                noisy_image = self.noisy_images[ds_idx][t_range, y_range, z_range]
         else:
             if self.phase_sin_list is not None:
                 # Phase has shape (T_full, H) — slice matching time and row dims
@@ -541,7 +566,13 @@ class DatasetSUPPORT(Dataset):
                 phase_cos = None
             noisy_image_avg = torch.tensor(self.noisy_images[ds_idx].attrs["mean"])
             noisy_image_std = torch.tensor(self.noisy_images[ds_idx].attrs["std"])
-            noisy_image = self.noisy_images[ds_idx][t_range, y_range, z_range]
+
+            # Handle 4D (splatting) vs 3D (normal) data
+            if len(self.noisy_images[ds_idx].shape) == 4:
+                # Splatting: [T, C, H, W] -> slice as [t_range, :, y_range, z_range]
+                noisy_image = self.noisy_images[ds_idx][t_range, :, y_range, z_range]
+            else:
+                noisy_image = self.noisy_images[ds_idx][t_range, y_range, z_range]
 
             noisy_image = torch.tensor(noisy_image, dtype=torch.float32)
             if self.phase_sin_list is not None:
@@ -689,6 +720,7 @@ def gen_train_dataloader(
     is_raw=False,
     rank=0,
     use_phase_conditioning=False,
+    use_splatting=False,
 ):
     """
     Generate dataloader for training
@@ -699,6 +731,8 @@ def gen_train_dataloader(
         noisy_data_list: opt.noisy_data
         opt: options object (must have lazy_loading attribute)
         rank: process rank in distributed training (default 0)
+        use_phase_conditioning: whether to extract phase info (bool)
+        use_splatting: whether to load raw data for splatting (bool)
 
     Returns:
         dataloader_train
@@ -715,7 +749,13 @@ def gen_train_dataloader(
             noisy_images_train.append(noisy_image)
         else:
             with zarr.open(noisy_data, mode="r") as store:
-                if is_raw:
+                if use_splatting:
+                    noisy_image = store["splatted"]
+                    # noisy_images_train.append(noisy_image)
+
+                    # Don't extract phase when using splatting (it's in the raw signal)
+
+                elif is_raw:
                     noisy_image = store["eod"]
 
                     if use_phase_conditioning:
