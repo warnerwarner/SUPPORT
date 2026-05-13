@@ -58,9 +58,9 @@ def train(
 
     Returns:
         loss_list: list of total loss of each batch ([float])
-        loss_list_l1: list of L1 loss of each batch ([float]) or empty for splatting
-        loss_list_l2: list of L2 loss of each batch ([float]) or empty for splatting
-        grads or loss_list_components: gradient norms dict if track_gradients else loss components
+        loss_list_l1: list of L1 loss of each batch ([float])
+        loss_list_l2: list of L2 loss of each batch ([float])
+        grads: gradient norms dict if track_gradients (optional)
     """
     if loss_coef is None:
         loss_coef = getattr(opt, "loss_coef", [1.0, 1.0])
@@ -74,26 +74,12 @@ def train(
     loss_list = []
     grads = defaultdict(list) if track_gradients else {}
 
-    # Additional loss tracking for splatting mode
-    if opt.use_splatting:
-        loss_list_components = {
-            "denoise": [],
-            "param_reg": [],
-            "signal_pres": [],
-            "tv": [],
-            "temporal": [],
-        }
-
     # Initialize loss functions based on option
     if loss_option == "l1_l2":
         L1_pixelwise = torch.nn.L1Loss()
         L2_pixelwise = torch.nn.MSELoss()
     elif loss_option == "huber":
         huber_pixelwise = torch.nn.HuberLoss(delta=0.2)
-
-    # Compute regularization decay factor for this epoch
-    if opt.use_splatting:
-        epoch_factor = np.exp(-epoch / opt.reg_decay_epochs)
 
     # training
     for i, data in enumerate(tqdm(train_dataloader)):
@@ -123,103 +109,56 @@ def train(
         else:
             (noisy_image, _, ds_idx) = data
 
-        # Handle shape differences for splatting vs non-splatting
         B, T, X, Y = noisy_image.shape  # [B, T, H, W]
 
         noisy_image = noisy_image.cuda()
 
-        # Random transforms - skip for splatting mode (rotation complicates position channel)
-        if not opt.use_splatting:
-            noisy_image, _, phase_sin, phase_cos = random_transform(
-                noisy_image, None, rng, is_rotate, phase_sin, phase_cos
-            )
+        noisy_image, _, phase_sin, phase_cos = random_transform(
+            noisy_image, None, rng, is_rotate, phase_sin, phase_cos
+        )
 
         if opt.is_zarr:
             noisy_image_avg = noisy_image_avg.cuda()
             noisy_image_std = noisy_image_std.cuda()
-            if opt.use_splatting:
-                # Normalize only the EOD channel (channel 0)
-                noisy_image[:, :, 0:1, :, :] = (
-                    noisy_image[:, :, 0:1, :, :] - noisy_image_avg
-                ) / noisy_image_std
-            else:
-                noisy_image = (noisy_image - noisy_image_avg) / noisy_image_std
+            noisy_image = (noisy_image - noisy_image_avg) / noisy_image_std
 
-        # Prepare target for non-splatting mode
-        if not opt.use_splatting:
-            noisy_image_target = torch.unsqueeze(
-                noisy_image[:, int(T / 2), :, :], dim=1
-            )
+        noisy_image_target = torch.unsqueeze(noisy_image[:, int(T / 2), :, :], dim=1)
 
         optimizer.zero_grad()
 
         # Forward pass wrapped in autocast for AMP
         with torch.cuda.amp.autocast(enabled=opt.use_amp):
-            if opt.use_splatting and patch_coords is not None:
-                patch_origin = torch.cat(
-                    [patch_coords[:, 1, 0:1], patch_coords[:, 2, 0:1]], dim=1
-                ).to(noisy_image.device)
-                full_w = train_dataloader.dataset.noisy_images[0].shape[-1]
-                full_n_samples = torch.full(
-                    (patch_origin.shape[0],),
-                    int(full_w),
-                    dtype=torch.int64,
-                    device=noisy_image.device,
-                )
-                noisy_image_denoised = model(
-                    noisy_image,
-                    patch_origin=patch_origin,
-                    full_n_samples=full_n_samples,
-                )
-            elif (
-                getattr(opt, "use_phase_conditioning", False) and phase_sin is not None
-            ):
+            if getattr(opt, "use_phase_conditioning", False) and phase_sin is not None:
                 noisy_image_denoised = model(noisy_image, phase_sin, phase_cos)
             else:
                 noisy_image_denoised = model(noisy_image)
 
-            if opt.use_splatting:
-                # Use splatting loss
-                loss_dict = compute_splatting_loss(
-                    model, noisy_image, noisy_image_denoised, epoch_factor, opt
+            # Handle different loss options
+            if loss_option == "l1_l2":
+                loss_l1_pixelwise = L1_pixelwise(
+                    noisy_image_denoised, noisy_image_target
                 )
-                loss_sum = loss_dict["total"]
-                # Track components
-                for key in loss_list_components.keys():
-                    loss_list_components[key].append(loss_dict[key].item())
-            else:
-                # Handle different loss options
-                if loss_option == "l1_l2":
-                    loss_l1_pixelwise = L1_pixelwise(
-                        noisy_image_denoised, noisy_image_target
-                    )
-                    loss_l2_pixelwise = L2_pixelwise(
-                        noisy_image_denoised, noisy_image_target
-                    )
-                    loss_sum = (
-                        loss_coef[0] * loss_l1_pixelwise
-                        + loss_coef[1] * loss_l2_pixelwise
-                    )
-                elif loss_option == "huber":
-                    loss_sum = huber_pixelwise(noisy_image_denoised, noisy_image_target)
-                elif loss_option == "robust":
-                    loss_sum = robust_loss(
-                        noisy_image_denoised - noisy_image_target,
-                        alpha=loss_coef[0],
-                        c=loss_coef[1],
-                    ).sum()
+                loss_l2_pixelwise = L2_pixelwise(
+                    noisy_image_denoised, noisy_image_target
+                )
+                loss_sum = (
+                    loss_coef[0] * loss_l1_pixelwise + loss_coef[1] * loss_l2_pixelwise
+                )
+            elif loss_option == "huber":
+                loss_sum = huber_pixelwise(noisy_image_denoised, noisy_image_target)
+            elif loss_option == "robust":
+                loss_sum = robust_loss(
+                    noisy_image_denoised - noisy_image_target,
+                    alpha=loss_coef[0],
+                    c=loss_coef[1],
+                ).sum()
 
-                if loss_option == "l1_l2":
-                    loss_list_l1.append(loss_l1_pixelwise.item())
-                    loss_list_l2.append(loss_l2_pixelwise.item())
+            if loss_option == "l1_l2":
+                loss_list_l1.append(loss_l1_pixelwise.item())
+                loss_list_l2.append(loss_l2_pixelwise.item())
 
         # Backward pass with GradScaler if AMP is enabled
         scaler.scale(loss_sum).backward()
-
-        # Gradient clipping for splatting mode
-        if opt.use_splatting and opt.grad_clip_max > 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip_max)
 
         # Track gradients if requested
         if track_gradients:
@@ -244,45 +183,25 @@ def train(
                     "Loss/train_batch", loss_mean, epoch * len(train_dataloader) + i
                 )
 
-            if opt.use_splatting:
-                # Log splatting loss components
-                component_means = {
-                    key: np.mean(np.array(vals))
-                    for key, vals in loss_list_components.items()
-                }
-                if writer is not None:
-                    for key, val in component_means.items():
-                        writer.add_scalar(
-                            f"Loss_Components/{key}_batch",
-                            val,
-                            epoch * len(train_dataloader) + i,
-                        )
-
-                logging.info(
-                    f"[{ts}] Epoch [{epoch}/{opt.n_epochs}] Batch [{i + 1}/{len(train_dataloader)}] "
-                    + f"loss: {loss_mean:.4f}, denoise: {component_means['denoise']:.4f}, "
-                    + f"param_reg: {component_means['param_reg']:.4f}"
+            # Standard logging
+            loss_mean_l1 = np.mean(np.array(loss_list_l1))
+            loss_mean_l2 = np.mean(np.array(loss_list_l2))
+            if writer is not None:
+                writer.add_scalar(
+                    "Loss_l1/train_batch",
+                    loss_mean_l1,
+                    epoch * len(train_dataloader) + i,
                 )
-            else:
-                # Standard logging
-                loss_mean_l1 = np.mean(np.array(loss_list_l1))
-                loss_mean_l2 = np.mean(np.array(loss_list_l2))
-                if writer is not None:
-                    writer.add_scalar(
-                        "Loss_l1/train_batch",
-                        loss_mean_l1,
-                        epoch * len(train_dataloader) + i,
-                    )
-                    writer.add_scalar(
-                        "Loss_l2/train_batch",
-                        loss_mean_l2,
-                        epoch * len(train_dataloader) + i,
-                    )
-
-                logging.info(
-                    f"[{ts}] Epoch [{epoch}/{opt.n_epochs}] Batch [{i + 1}/{len(train_dataloader)}] "
-                    + f"loss : {loss_mean:.4f}, loss_l1 : {loss_mean_l1:.4f}, loss_l2 : {loss_mean_l2:.4f}"
+                writer.add_scalar(
+                    "Loss_l2/train_batch",
+                    loss_mean_l2,
+                    epoch * len(train_dataloader) + i,
                 )
+
+            logging.info(
+                f"[{ts}] Epoch [{epoch}/{opt.n_epochs}] Batch [{i + 1}/{len(train_dataloader)}] "
+                + f"loss : {loss_mean:.4f}, loss_l1 : {loss_mean_l1:.4f}, loss_l2 : {loss_mean_l2:.4f}"
+            )
 
         # save model, optimizer, and scaler
         if (opt.checkpoint_interval != -1) and (i % opt.checkpoint_interval_batch == 0):
@@ -305,9 +224,7 @@ def train(
                     % (opt.exp_name, epoch, i),
                 )
 
-    if opt.use_splatting:
-        return loss_list, loss_list_components
-    elif track_gradients:
+    if track_gradients:
         return loss_list, loss_list_l1, loss_list_l2, grads
     else:
         return loss_list, loss_list_l1, loss_list_l2
@@ -328,7 +245,6 @@ def basic_train(opt, rng=None, epochs=3):
         use_splatting=opt.use_splatting,
     )
 
-    print("ah")
     model = SUPPORT(
         in_channels=opt.input_frames,
         mid_channels=opt.unet_channels,
@@ -359,7 +275,7 @@ def basic_train(opt, rng=None, epochs=3):
         print(f"Epoch {epoch} loss: {np.mean(outsed[0][-10:])}")
         outs.append(outsed)
 
-    return outs
+    return outs, model
 
 
 if __name__ == "__main__":

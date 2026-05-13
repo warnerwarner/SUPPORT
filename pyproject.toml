@@ -27,6 +27,7 @@ matplotlib = ">=3.9.4,<4"
 pytorch-gpu = "*"
 numba = ">=0.57.1,<0.58"
 pyfftw = ">=0.15.0,<0.16"
+pytest = ">=9.0.2,<10"
 
 [tool.pixi.pypi-dependencies]
 pyqt5 = "==5.15.7"
@@ -38,5 +39,14 @@ pyqt5-sip = "==12.11.0"
 [tool.basedpyright]
 venvPath = ".pixi/envs"
 venv = "default"
-typeCheckingMode = "standard"
+typeCheckingMode = "recommended"
 reportMissingTypeStubs = false
+reportAttributeAccessIssue = false
+useLibraryCodeForTypes = false
+exclude = [
+  "**/.pixi",
+  "**/site-packages/torch",
+  "**/site-packages/torchvision",
+  "**/site-packages/torch_geometric"
+]
+include = ["."]

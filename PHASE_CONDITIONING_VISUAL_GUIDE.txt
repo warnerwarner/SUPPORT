@@ -1,0 +1,255 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                  --use_phase_conditioning FLAG FLOW DIAGRAM                    ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+COMMAND LINE INPUT
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ python src/train_distributed.py --use_phase_conditioning --is_zarr --is_raw  │
+└──────────────────┬───────────────────────────────────────────────────────────┘
+                   │
+                   ▼
+ARGUMENT PARSING (util.py)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ opt.use_phase_conditioning = True  (boolean flag)                            │
+└──────────────────┬───────────────────────────────────────────────────────────┘
+                   │
+                   ▼
+GEN_TRAIN_DATALOADER (dataset.py)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ if use_phase_conditioning:                                                   │
+│     phase_sin_list = []                                                      │
+│     phase_cos_list = []                                                      │
+│                                                                              │
+│     For each zarr file:                                                     │
+│         position_signal = store["position"][:]  # Shape: (T, H, W)          │
+│         phase_sin, phase_cos = extract_phase(position_signal)               │
+│         → Hilbert transform along W dimension                               │
+│         → Extract phase at center pixel: angle(analytic[:,:,W//2])          │
+│         → Convert to sin/cos for stability                                  │
+│         → Result: (T, H) tensors                                            │
+│         phase_sin_list.append(phase_sin)                                   │
+│         phase_cos_list.append(phase_cos)                                   │
+└──────────────────┬───────────────────────────────────────────────────────────┘
+                   │
+                   ▼
+DATASET (dataset.py - DatasetSUPPORT)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ __init__(phase_sin_list, phase_cos_list)                                     │
+│     self.phase_sin_list = phase_sin_list  # List of (T_per_file, H) tensors  │
+│     self.phase_cos_list = phase_cos_list                                    │
+│                                                                              │
+│ __getitem__(i):                                                              │
+│     if self.phase_sin_list is not None:                                     │
+│         phase_sin = self.phase_sin_list[ds_idx][t_range, y_range]           │
+│         phase_cos = self.phase_cos_list[ds_idx][t_range, y_range]           │
+│         return (img, coords, ds_idx, mean, std, phase_sin, phase_cos)       │
+│              # 7-tuple with phase                                           │
+│     else:                                                                    │
+│         return (img, coords, ds_idx, mean, std)  # 5-tuple, no phase        │
+└──────────────────┬───────────────────────────────────────────────────────────┘
+                   │
+                   ▼
+TRAINING LOOP (train_distributed.py)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ for batch in dataloader:                                                     │
+│     if opt.is_zarr and opt.use_phase_conditioning:                           │
+│         (img, _, ds_idx, mean, std, phase_sin, phase_cos) = batch           │
+│         # Unpack 7-tuple                                                    │
+│         phase_sin = phase_sin.cuda()  # (B, T, H)                           │
+│         phase_cos = phase_cos.cuda()                                        │
+│     else:                                                                    │
+│         phase_sin = None                                                    │
+│         phase_cos = None                                                    │
+│                                                                              │
+│     if use_phase_conditioning and phase_sin is not None:                    │
+│         output = model(img, phase_sin, phase_cos)  # Pass phase            │
+│     else:                                                                   │
+│         output = model(img)  # No phase                                     │
+└──────────────────┬───────────────────────────────────────────────────────────┘
+                   │
+                   ▼
+MODEL FORWARD (model/SUPPORT.py)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ def forward(x, phase_sin=None, phase_cos=None):                              │
+│     # x: (B, T, H, W)                                                        │
+│     # phase_sin, phase_cos: (B, T, H)                                        │
+│                                                                              │
+│     center = in_channels // 2                                                │
+│                                                                              │
+│     if self.use_phase_conditioning and phase_sin is not None:               │
+│         # Split phase like image channels                                   │
+│         unet_phase_sin = cat([phase_sin[:,:center,:],                       │
+│                               phase_sin[:,center+1:,:]])  # (B, T-1, H)     │
+│         unet_phase_cos = cat([phase_cos[:,:center,:],                       │
+│                               phase_cos[:,center+1:,:]])                    │
+│         bsnet_phase_sin = phase_sin[:, center, :]  # (B, H)                 │
+│         bsnet_phase_cos = phase_cos[:, center, :]                           │
+│                                                                              │
+│         # Broadcast U-Net phase to (B, T-1, H, W)                           │
+│         u_sin = unet_phase_sin.unsqueeze(-1).expand(B, T-1, H, W)          │
+│         u_cos = unet_phase_cos.unsqueeze(-1).expand(B, T-1, H, W)          │
+│                                                                              │
+│         # Concatenate with images                                           │
+│         unet_in = cat([images, u_sin, u_cos], dim=1)  # (B, 3*(T-1), H, W) │
+│     else:                                                                    │
+│         unet_in = images  # (B, T-1, H, W)                                  │
+│                                                                              │
+│     # Process through U-Net                                                 │
+│     unet_out = forward_unet(unet_in)                                        │
+│                                                                              │
+│     # Process through BS-Net with phase                                     │
+│     bsnet_out = forward_bsnet(bsnet_in, unet_out,                           │
+│                               bsnet_phase_sin, bsnet_phase_cos)             │
+│                                                                              │
+│     # Concatenate and output                                                │
+│     x = cat([unet_out, bsnet_out], dim=1)  # (B, 2, H, W)                  │
+│     output = last_layers(x)  # (B, 1, H, W)                                 │
+│     return output                                                            │
+└──────────────────┬───────────────────────────────────────────────────────────┘
+                   │
+                   ▼
+OUTPUT (Denoised Center Frame)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Shape: (B, 1, H, W) - Denoised center frame with phase context               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                    ARCHITECTURE DIFFERENCES: WITH vs WITHOUT PHASE             ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+WITHOUT PHASE CONDITIONING                WITH PHASE CONDITIONING
+═══════════════════════════════════════   ════════════════════════════════════
+
+Input Batch (5-tuple):                    Input Batch (7-tuple):
+  (img, coords, ds_idx, mean, std)          (img, coords, ds_idx, mean, std,
+                                            phase_sin, phase_cos)
+
+U-Net Input Channels:                     U-Net Input Channels:
+  T-1 = 60 (61 frames - center)             3*(T-1) = 180
+                                            (60 images + 60 sin + 60 cos)
+
+U-Net Architecture:                       U-Net Architecture:
+  Conv2d(60, 16, ...)                       Conv2d(180, 16, ...)
+  ↓                                         ↓
+  [Same encoder/decoder]                    [Same encoder/decoder]
+
+
+BS-Net First Layer:                       BS-Net First Layer:
+  Conv2d(unet_out + 1, blind_conv_ch)      Conv2d(unet_out + 3, blind_conv_ch)
+                                            (adds sin + cos of center frame)
+
+BS-Net Layer 0 Input:                     BS-Net Layer 0 Input:
+  (B, 1, H, W) - center frame              (B, 3, H, W)
+                                           [center_frame, sin, cos]
+
+BS-Net Deeper Layers (c >= 1):            BS-Net Deeper Layers (c >= 1):
+  x = x + scalars[c-1] * x_in              x = x + inject_proj[c-1](x_inject)
+  (scalar multiplication)                   (learned 1×1 convolution)
+
+Data Augmentation:                        Data Augmentation:
+  Random 90° rotations: ENABLED            Random 90° rotations: DISABLED
+  (would mix row/column dimensions when
+   phase per-row, so avoided)
+  Flips: Applied to images only            Flips: Applied to images AND phase
+
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                          TENSOR SHAPE EVOLUTION                               ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+WITH PHASE CONDITIONING:
+
+Zarr store["position"]
+    │
+    ├─► Shape: (T=1000, H=512, W=512)
+    │
+extract_phase()
+    │
+    ├─► Hilbert transform along W axis
+    ├─► Extract phase at W//2
+    ├─► Convert to sin/cos
+    │
+    └─► OUTPUT: (T=1000, H=512)
+
+Dataset per file
+    │
+    ├─► phase_sin_list = [(1000, 512), (1000, 512), ...]
+    └─► phase_cos_list = [(1000, 512), (1000, 512), ...]
+
+Batch from DataLoader
+    │
+    ├─► img:       (B=8, T=61, H=128, W=128)
+    ├─► phase_sin: (B=8, T=61, H=128)
+    └─► phase_cos: (B=8, T=61, H=128)
+
+In forward(), split for U-Net & BS-Net
+    │
+    ├─► unet_phase_sin:  (B=8, T-1=60, H=128)
+    ├─► unet_phase_cos:  (B=8, T-1=60, H=128)
+    ├─► bsnet_phase_sin: (B=8, H=128)
+    └─► bsnet_phase_cos: (B=8, H=128)
+
+Broadcast to spatial dims
+    │
+    ├─► u_sin: (B=8, T-1=60, H=128, W=128)
+    └─► u_cos: (B=8, T-1=60, H=128, W=128)
+
+Concatenate with images
+    │
+    └─► unet_in: (B=8, 3*60=180, H=128, W=128)
+
+
+WITHOUT PHASE CONDITIONING:
+
+Dataset per file
+    │
+    ├─► phase_sin_list = None
+    └─► phase_cos_list = None
+
+Batch from DataLoader
+    │
+    └─► img: (B=8, T=61, H=128, W=128)
+        (no phase tensors)
+
+In forward()
+    │
+    └─► phase_sin = None, phase_cos = None
+
+Concatenate images only
+    │
+    └─► unet_in: (B=8, T-1=60, H=128, W=128)
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+CRITICAL IMPLEMENTATION DETAILS
+
+1. Phase is PER-ROW, PER-FRAME:
+   - Not per-pixel, not global
+   - One phase value per row and per frame
+   - Makes it row-dependent, column-independent
+
+2. Phase Extraction (Hilbert Transform):
+   - Position signal is sinusoidal along WIDTH dimension
+   - Hilbert transform converts to analytic signal
+   - Phase extracted at center pixel (W//2) for stability
+   - Converted to sin/cos to avoid phase wrapping
+
+3. U-Net vs BS-Net Phase Split:
+   - U-Net gets ALL non-center frames: (T-1, H)
+   - BS-Net gets ONLY center frame: (H,)
+   - This is intentional - center frame is special (denoising target)
+
+4. Phase Injection at BS-Net Layers:
+   - Layer 0: 3-channel input [image, sin, cos]
+   - Layers ≥1: Re-inject via learned 1×1 convolutions
+   - Replaces scalar multiplication (without phase)
+
+5. Why Rotations are Disabled:
+   - Phase is per-row (constant along columns)
+   - 90° rotation would mix row/column dimensions
+   - This would corrupt phase information
+   - Flips are safe because they preserve row/column structure
+
+═══════════════════════════════════════════════════════════════════════════════════
