@@ -316,7 +316,6 @@ if __name__ == "__main__":
         noisy_data,
         opt,
         is_zarr=opt.is_zarr,
-        use_splatting=opt.use_splatting,
     )
 
     # ----------
