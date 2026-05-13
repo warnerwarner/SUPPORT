@@ -242,7 +242,6 @@ def basic_train(opt, rng=None, epochs=3):
         is_raw=opt.is_raw,
         rank=0,  # Pass rank for distributed cache synchronization
         use_phase_conditioning=opt.use_phase_conditioning,
-        use_splatting=opt.use_splatting,
     )
 
     model = SUPPORT(
