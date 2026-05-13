@@ -309,6 +309,8 @@ def parse_arguments(args=None):
 
     if opt.dataset_key == "raw":
         opt.is_raw = True
+    else:
+        opt.is_raw = False
     if not opt.is_zarr:
         if opt.is_folder:
             all_files = []
