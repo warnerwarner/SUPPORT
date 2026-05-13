@@ -720,7 +720,6 @@ def gen_train_dataloader(
     is_raw=False,
     rank=0,
     use_phase_conditioning=False,
-    use_splatting=False,
 ):
     """
     Generate dataloader for training
@@ -732,7 +731,6 @@ def gen_train_dataloader(
         opt: options object (must have lazy_loading attribute)
         rank: process rank in distributed training (default 0)
         use_phase_conditioning: whether to extract phase info (bool)
-        use_splatting: whether to load raw data for splatting (bool)
 
     Returns:
         dataloader_train
@@ -749,13 +747,7 @@ def gen_train_dataloader(
             noisy_images_train.append(noisy_image)
         else:
             with zarr.open(noisy_data, mode="r") as store:
-                if use_splatting:
-                    noisy_image = store["splatted"]
-                    # noisy_images_train.append(noisy_image)
-
-                    # Don't extract phase when using splatting (it's in the raw signal)
-
-                elif is_raw:
+                if is_raw:
                     noisy_image = store["eod"]
 
                     if use_phase_conditioning:
@@ -771,8 +763,10 @@ def gen_train_dataloader(
                         shifts = calculate_peak_shifts(position_signal)
                         noisy_image = AlignedZarr(noisy_data, shifts=shifts)
                 else:
-                    noisy_image = store["reconstructed"]
-            print(f"Loaded {noisy_data} Shape : {noisy_image.shape}")
+                    noisy_image = store[opt.dataset_key]
+            print(
+                f"Loaded {noisy_data} Shape : {noisy_image.shape} with key {opt.dataset_key}"
+            )
             noisy_images_train.append(noisy_image)
 
     dataset_train = DatasetSUPPORT(
